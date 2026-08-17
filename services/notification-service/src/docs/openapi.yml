@@ -1,0 +1,203 @@
+openapi: 3.0.3
+
+info:
+  title: SmartRetailX Notification API
+  description: Notification management API for SmartRetailX.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:3006
+    description: Local development server
+
+tags:
+  - name: Notifications
+    description: Notification management operations
+
+paths:
+
+  /api/v1/notifications:
+
+    get:
+      tags:
+        - Notifications
+
+      summary: Get notifications
+
+      parameters:
+
+        - name: customerId
+          in: query
+          required: false
+          schema:
+            type: string
+          example: U001
+
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - PENDING
+              - SENT
+              - FAILED
+              - READ
+
+      responses:
+
+        "200":
+          description: Notifications retrieved successfully
+
+
+    post:
+      tags:
+        - Notifications
+
+      summary: Create a notification
+
+      requestBody:
+        required: true
+
+        content:
+          application/json:
+
+            schema:
+              $ref: "#/components/schemas/CreateNotificationRequest"
+
+      responses:
+
+        "201":
+          description: Notification created successfully
+
+        "400":
+          description: Invalid request
+
+
+  /api/v1/notifications/{notificationId}:
+
+    get:
+      tags:
+        - Notifications
+
+      summary: Get notification by ID
+
+      parameters:
+
+        - name: notificationId
+          in: path
+          required: true
+
+          schema:
+            type: string
+
+          example: NOTIF1001
+
+      responses:
+
+        "200":
+          description: Notification retrieved successfully
+
+        "404":
+          description: Notification not found
+
+
+  /api/v1/notifications/{notificationId}/read:
+
+    patch:
+      tags:
+        - Notifications
+
+      summary: Mark notification as read
+
+      parameters:
+
+        - name: notificationId
+          in: path
+          required: true
+
+          schema:
+            type: string
+
+          example: NOTIF1001
+
+      responses:
+
+        "200":
+          description: Notification marked as read
+
+        "404":
+          description: Notification not found
+
+
+  /api/v1/notifications/{notificationId}/send:
+
+    post:
+      tags:
+        - Notifications
+
+      summary: Send notification
+
+      parameters:
+
+        - name: notificationId
+          in: path
+          required: true
+
+          schema:
+            type: string
+
+          example: NOTIF1001
+
+      responses:
+
+        "200":
+          description: Notification sent
+
+        "404":
+          description: Notification not found
+
+        "409":
+          description: Notification already sent
+
+
+components:
+
+  schemas:
+
+    CreateNotificationRequest:
+
+      type: object
+
+      required:
+        - customerId
+        - type
+        - channel
+        - message
+
+      properties:
+
+        customerId:
+          type: string
+          example: U001
+
+        type:
+          type: string
+          enum:
+            - ORDER_CREATED
+            - ORDER_CONFIRMED
+            - PAYMENT_COMPLETED
+            - PAYMENT_FAILED
+            - ORDER_SHIPPED
+            - ORDER_DELIVERED
+            - STOCK_ALERT
+
+        channel:
+          type: string
+          enum:
+            - EMAIL
+            - SMS
+            - PUSH
+
+        message:
+          type: string
+          example: Your order has been confirmed.

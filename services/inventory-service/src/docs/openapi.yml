@@ -1,0 +1,224 @@
+openapi: 3.0.3
+
+info:
+  title: SmartRetailX Inventory Management API
+  description: API for inventory, stock reservation and stock release.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:3004
+    description: Local development server
+
+tags:
+  - name: Inventory
+    description: Inventory management operations
+
+paths:
+
+  /api/v1/inventory/{productId}:
+
+    get:
+      tags:
+        - Inventory
+      summary: Get inventory for a product
+
+      parameters:
+        - name: productId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: P001
+
+      responses:
+        "200":
+          description: Inventory retrieved successfully
+
+        "404":
+          description: Inventory not found
+
+
+    patch:
+      tags:
+        - Inventory
+      summary: Update inventory
+
+      parameters:
+        - name: productId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: P001
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateInventoryRequest"
+
+      responses:
+        "200":
+          description: Inventory updated successfully
+
+        "400":
+          description: Invalid request
+
+        "409":
+          description: Invalid inventory state
+
+
+  /api/v1/inventory/{productId}/reserve:
+
+    post:
+      tags:
+        - Inventory
+      summary: Reserve inventory
+
+      parameters:
+        - name: productId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: P001
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InventoryOperationRequest"
+
+      responses:
+        "200":
+          description: Inventory reserved successfully
+
+        "400":
+          description: Invalid request
+
+        "409":
+          description: Insufficient inventory
+
+
+  /api/v1/inventory/{productId}/release:
+
+    post:
+      tags:
+        - Inventory
+      summary: Release reserved inventory
+
+      parameters:
+        - name: productId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: P001
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InventoryOperationRequest"
+
+      responses:
+        "200":
+          description: Inventory released successfully
+
+        "400":
+          description: Invalid request
+
+        "409":
+          description: Unable to release inventory
+
+
+components:
+
+  schemas:
+
+    Inventory:
+
+      type: object
+
+      properties:
+
+        productId:
+          type: string
+          example: P001
+
+        warehouseId:
+          type: string
+          example: WH01
+
+        quantity:
+          type: integer
+          minimum: 0
+          example: 100
+
+        reservedQuantity:
+          type: integer
+          minimum: 0
+          example: 20
+
+        availableQuantity:
+          type: integer
+          example: 80
+
+        reorderLevel:
+          type: integer
+          example: 10
+
+        createdAt:
+          type: string
+          format: date-time
+
+        updatedAt:
+          type: string
+          format: date-time
+
+
+    UpdateInventoryRequest:
+
+      type: object
+
+      required:
+        - warehouseId
+
+      properties:
+
+        warehouseId:
+          type: string
+          example: WH01
+
+        quantity:
+          type: integer
+          minimum: 0
+          example: 100
+
+        reorderLevel:
+          type: integer
+          minimum: 0
+          example: 10
+
+
+    InventoryOperationRequest:
+
+      type: object
+
+      required:
+        - warehouseId
+        - quantity
+
+      properties:
+
+        warehouseId:
+          type: string
+          example: WH01
+
+        quantity:
+          type: integer
+          minimum: 1
+          example: 5

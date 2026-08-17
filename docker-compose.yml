@@ -1,0 +1,358 @@
+services:
+
+  # =========================================================
+  # MYSQL
+  # =========================================================
+
+  mysql:
+    image: mysql:8.4
+    container_name: smartretailx-mysql
+    restart: unless-stopped
+
+    environment:
+          MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+          MYSQL_DATABASE: ${MYSQL_DATABASE}
+          MYSQL_USER: ${MYSQL_USER}
+          MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+
+    ports:
+      - "3306:3306"
+
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mysqladmin",
+          "ping",
+          "-h",
+          "localhost",
+          "-u",
+          "root",
+          "-p${MYSQL_ROOT_PASSWORD}"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+
+  # =========================================================
+  # MONGODB
+  # =========================================================
+
+  mongodb:
+    image: mongo:8
+    container_name: smartretailx-mongodb
+    restart: unless-stopped
+
+    ports:
+      - "27017:27017"
+
+    volumes:
+      - mongodb_data:/data/db
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--eval",
+          "db.adminCommand('ping')"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+
+  # =========================================================
+  # RABBITMQ
+  # =========================================================
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: smartretailx-rabbitmq
+    restart: unless-stopped
+
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "rabbitmq-diagnostics",
+          "-q",
+          "ping"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+
+  # =========================================================
+  # USER SERVICE
+  # =========================================================
+
+  user-service:
+    build:
+      context: ./services/user-service
+      dockerfile: Dockerfile
+
+    container_name: smartretailx-user-service
+    restart: unless-stopped
+
+    environment:
+      PORT: 3001
+      NODE_ENV: development
+
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: smartretailx_users
+
+    ports:
+      - "3001:3001"
+
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+
+  # =========================================================
+  # PRODUCT SERVICE
+  # =========================================================
+
+  product-service:
+    build:
+      context: ./services/product-service
+      dockerfile: Dockerfile
+
+    container_name: smartretailx-product-service
+    restart: unless-stopped
+
+    environment:
+      PORT: 3002
+      NODE_ENV: development
+      MONGO_URL: mongodb://mongodb:27017/smartretailx_products
+
+    ports:
+      - "3002:3002"
+
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+
+  # =========================================================
+  # ORDER SERVICE
+  # =========================================================
+
+  order-service:
+    build:
+      context: ./services/order-service
+      dockerfile: Dockerfile
+
+    container_name: smartretailx-order-service
+    restart: unless-stopped
+
+    environment:
+      PORT: 3003
+      NODE_ENV: development
+
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: smartretailx_orders
+
+      USER_SERVICE_URL: http://user-service:3001
+      PRODUCT_SERVICE_URL: http://product-service:3002
+
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672
+
+    ports:
+      - "3003:3003"
+
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+      rabbitmq:
+        condition: service_healthy
+
+      user-service:
+        condition: service_healthy
+
+      product-service:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+
+  # =========================================================
+  # INVENTORY SERVICE
+  # =========================================================
+
+  inventory-service:
+    build:
+      context: ./services/inventory-service
+      dockerfile: Dockerfile
+
+    container_name: smartretailx-inventory-service
+    restart: unless-stopped
+
+    environment:
+      PORT: 3004
+      NODE_ENV: development
+
+      MONGO_URL: mongodb://mongodb:27017/smartretailx_inventory
+
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672
+
+    ports:
+      - "3004:3004"
+
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+      rabbitmq:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3004/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+
+  # =========================================================
+  # PAYMENT SERVICE
+  # =========================================================
+
+  payment-service:
+    build:
+      context: ./services/payment-service
+      dockerfile: Dockerfile
+
+    container_name: smartretailx-payment-service
+    restart: unless-stopped
+
+    environment:
+      PORT: 3005
+      NODE_ENV: development
+
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: smartretailx_payment
+
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672
+
+    ports:
+      - "3005:3005"
+
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+      rabbitmq:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3005/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+
+  # =========================================================
+  # NOTIFICATION SERVICE
+  # =========================================================
+
+  notification-service:
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+
+    container_name: smartretailx-notification-service
+    restart: unless-stopped
+
+    environment:
+      PORT: 3006
+      NODE_ENV: development
+
+      MONGO_URL: mongodb://mongodb:27017/smartretailx_notifications
+
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672
+
+    ports:
+      - "3006:3006"
+
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+      rabbitmq:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3006/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+
+# =========================================================
+# VOLUMES
+# =========================================================
+
+volumes:
+
+  mysql_data:
+    name: smartretailx_mysql_data
+
+  mongodb_data:
+    name: smartretailx_mongodb_data
+
+  rabbitmq_data:
+    name: smartretailx_rabbitmq_data
+
+networks:
+  default:
+    name: smartretailx_network

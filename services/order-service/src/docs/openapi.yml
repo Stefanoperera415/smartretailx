@@ -1,0 +1,342 @@
+openapi: 3.0.3
+
+info:
+  title: SmartRetailX Order Processing API
+  description: REST API for order creation and order lifecycle management.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:3003
+    description: Local development server
+
+tags:
+  - name: Orders
+    description: Order management operations
+
+paths:
+
+  /api/v1/orders:
+
+    get:
+      tags:
+        - Orders
+      summary: Get all orders
+      responses:
+        "200":
+          description: Orders retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Order"
+
+    post:
+      tags:
+        - Orders
+      summary: Create a new order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrderRequest"
+
+      responses:
+        "201":
+          description: Order created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Order"
+
+        "400":
+          description: Invalid request
+
+
+  /api/v1/orders/customer/{userId}:
+
+    get:
+      tags:
+        - Orders
+      summary: Get all orders for a customer
+
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: U001
+
+      responses:
+        "200":
+          description: Customer orders retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Order"
+
+
+  /api/v1/orders/{orderId}:
+
+    get:
+      tags:
+        - Orders
+      summary: Get an order by ID
+
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: ORD001
+
+      responses:
+        "200":
+          description: Order retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Order"
+
+        "404":
+          description: Order not found
+
+
+  /api/v1/orders/{orderId}/status:
+
+    patch:
+      tags:
+        - Orders
+      summary: Update order status
+
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: ORD001
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateOrderStatusRequest"
+
+      responses:
+        "200":
+          description: Order status updated successfully
+
+        "400":
+          description: Invalid status
+
+        "404":
+          description: Order not found
+
+
+components:
+
+  schemas:
+
+    Order:
+
+      type: object
+
+      properties:
+
+        orderId:
+          type: string
+          example: ORD001
+
+        customerId:
+          type: string
+          example: U001
+
+        status:
+          type: string
+          enum:
+            - PENDING
+            - CONFIRMED
+            - PROCESSING
+            - SHIPPED
+            - DELIVERED
+            - CANCELLED
+            - PAYMENT_FAILED
+          example: PENDING
+
+        totalAmount:
+          type: number
+          format: double
+          example: 49.98
+
+        currency:
+          type: string
+          example: GBP
+
+        shippingAddress:
+          $ref: "#/components/schemas/ShippingAddress"
+
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrderItem"
+
+        createdAt:
+          type: string
+          format: date-time
+
+        updatedAt:
+          type: string
+          format: date-time
+
+
+    OrderItem:
+
+      type: object
+
+      properties:
+
+        productId:
+          type: string
+          example: P001
+
+        quantity:
+          type: integer
+          minimum: 1
+          example: 2
+
+        unitPrice:
+          type: number
+          format: double
+          example: 2.99
+
+        subtotal:
+          type: number
+          format: double
+          example: 5.98
+
+
+    ShippingAddress:
+
+      type: object
+
+      required:
+        - line1
+        - city
+        - postcode
+        - country
+
+      properties:
+
+        line1:
+          type: string
+          example: 123 Main Street
+
+        city:
+          type: string
+          example: London
+
+        postcode:
+          type: string
+          example: SW1A 1AA
+
+        country:
+          type: string
+          example: United Kingdom
+
+
+    CreateOrderRequest:
+
+      type: object
+
+      required:
+        - customerId
+        - items
+        - shippingAddress
+
+      properties:
+
+        customerId:
+          type: string
+          example: U001
+
+        currency:
+          type: string
+          default: GBP
+          example: GBP
+
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/CreateOrderItem"
+
+        shippingAddress:
+          $ref: "#/components/schemas/ShippingAddress"
+
+
+    CreateOrderItem:
+
+      type: object
+
+      required:
+        - productId
+        - quantity
+        - unitPrice
+
+      properties:
+
+        productId:
+          type: string
+          example: P001
+
+        quantity:
+          type: integer
+          minimum: 1
+          example: 2
+
+        unitPrice:
+          type: number
+          format: double
+          minimum: 0
+          example: 2.99
+
+
+    UpdateOrderStatusRequest:
+
+      type: object
+
+      required:
+        - status
+
+      properties:
+
+        status:
+          type: string
+          enum:
+            - PENDING
+            - CONFIRMED
+            - PROCESSING
+            - SHIPPED
+            - DELIVERED
+            - CANCELLED
+            - PAYMENT_FAILED
+          example: CONFIRMED

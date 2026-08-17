@@ -1,0 +1,194 @@
+openapi: 3.0.3
+
+info:
+  title: SmartRetailX Payment API
+  description: Payment processing API for SmartRetailX.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:3005
+    description: Local development server
+
+tags:
+  - name: Payments
+    description: Payment management operations
+
+paths:
+
+  /api/v1/payments:
+
+    get:
+      tags:
+        - Payments
+      summary: Get all payments
+
+      responses:
+        "200":
+          description: Payments retrieved successfully
+
+    post:
+      tags:
+        - Payments
+      summary: Create a payment
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePaymentRequest"
+
+      responses:
+        "201":
+          description: Payment created successfully
+
+        "400":
+          description: Invalid payment request
+
+
+  /api/v1/payments/{paymentId}:
+
+    get:
+      tags:
+        - Payments
+      summary: Get payment by ID
+
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: PAY1001
+
+      responses:
+        "200":
+          description: Payment retrieved successfully
+
+        "404":
+          description: Payment not found
+
+
+  /api/v1/payments/order/{orderId}:
+
+    get:
+      tags:
+        - Payments
+      summary: Get payments for an order
+
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: ORD1001
+
+      responses:
+        "200":
+          description: Payments retrieved successfully
+
+
+  /api/v1/payments/{paymentId}/refund:
+
+    post:
+      tags:
+        - Payments
+      summary: Refund a completed payment
+
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: PAY1001
+
+      responses:
+        "200":
+          description: Payment refunded successfully
+
+        "404":
+          description: Payment not found
+
+        "409":
+          description: Payment cannot be refunded
+
+
+components:
+
+  schemas:
+
+    CreatePaymentRequest:
+
+      type: object
+
+      required:
+        - orderId
+        - customerId
+        - amount
+
+      properties:
+
+        orderId:
+          type: string
+          example: ORD1001
+
+        customerId:
+          type: string
+          example: U001
+
+        amount:
+          type: number
+          format: double
+          minimum: 0.01
+          example: 49.98
+
+        currency:
+          type: string
+          default: GBP
+          example: GBP
+
+
+    Payment:
+
+      type: object
+
+      properties:
+
+        payment_id:
+          type: string
+          example: PAY1001
+
+        order_id:
+          type: string
+          example: ORD1001
+
+        customer_id:
+          type: string
+          example: U001
+
+        amount:
+          type: number
+          example: 49.98
+
+        currency:
+          type: string
+          example: GBP
+
+        status:
+          type: string
+          enum:
+            - PENDING
+            - AUTHORIZED
+            - COMPLETED
+            - FAILED
+            - REFUNDED
+
+        provider:
+          type: string
+          example: MOCK_GATEWAY
+
+        transaction_ref:
+          type: string
+          nullable: true
