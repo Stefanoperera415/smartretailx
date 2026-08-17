@@ -1,3 +1,4 @@
+
 services:
 
   # =========================================================
@@ -6,14 +7,13 @@ services:
 
   mysql:
     image: mysql:8.4
-    container_name: smartretailx-mysql
     restart: unless-stopped
 
     environment:
-          MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-          MYSQL_DATABASE: ${MYSQL_DATABASE}
-          MYSQL_USER: ${MYSQL_USER}
-          MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
 
     ports:
       - "3306:3306"
@@ -45,7 +45,6 @@ services:
 
   mongodb:
     image: mongo:8
-    container_name: smartretailx-mongodb
     restart: unless-stopped
 
     ports:
@@ -73,7 +72,6 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management
-    container_name: smartretailx-rabbitmq
     restart: unless-stopped
 
     environment:
@@ -109,7 +107,6 @@ services:
       context: ./services/user-service
       dockerfile: Dockerfile
 
-    container_name: smartretailx-user-service
     restart: unless-stopped
 
     environment:
@@ -130,7 +127,11 @@ services:
         condition: service_healthy
 
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3001/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://localhost:3001/health"
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -146,12 +147,12 @@ services:
       context: ./services/product-service
       dockerfile: Dockerfile
 
-    container_name: smartretailx-product-service
     restart: unless-stopped
 
     environment:
       PORT: 3002
       NODE_ENV: development
+
       MONGO_URL: mongodb://mongodb:27017/smartretailx_products
 
     ports:
@@ -162,7 +163,11 @@ services:
         condition: service_healthy
 
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3002/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://localhost:3002/health"
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -178,7 +183,6 @@ services:
       context: ./services/order-service
       dockerfile: Dockerfile
 
-    container_name: smartretailx-order-service
     restart: unless-stopped
 
     environment:
@@ -213,7 +217,11 @@ services:
         condition: service_healthy
 
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3003/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://localhost:3003/health"
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -229,7 +237,6 @@ services:
       context: ./services/inventory-service
       dockerfile: Dockerfile
 
-    container_name: smartretailx-inventory-service
     restart: unless-stopped
 
     environment:
@@ -251,7 +258,11 @@ services:
         condition: service_healthy
 
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3004/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://localhost:3004/health"
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -267,7 +278,6 @@ services:
       context: ./services/payment-service
       dockerfile: Dockerfile
 
-    container_name: smartretailx-payment-service
     restart: unless-stopped
 
     environment:
@@ -293,7 +303,11 @@ services:
         condition: service_healthy
 
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3005/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://localhost:3005/health"
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -309,7 +323,6 @@ services:
       context: ./services/notification-service
       dockerfile: Dockerfile
 
-    container_name: smartretailx-notification-service
     restart: unless-stopped
 
     environment:
@@ -331,7 +344,11 @@ services:
         condition: service_healthy
 
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3006/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://localhost:3006/health"
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -343,16 +360,7 @@ services:
 # =========================================================
 
 volumes:
-
   mysql_data:
-    name: smartretailx_mysql_data
-
   mongodb_data:
-    name: smartretailx_mongodb_data
-
   rabbitmq_data:
-    name: smartretailx_rabbitmq_data
 
-networks:
-  default:
-    name: smartretailx_network
