@@ -119,6 +119,9 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_DATABASE: smartretailx_users
 
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN}
+
     ports:
       - "3001:3001"
 
