@@ -1,6 +1,11 @@
 const orderRepository = require("../repositories/orderRepository");
-const { getUser, getProduct } = require("../clients/serviceClient");
-const { publishEvent } = require("../events/eventPublisher");
+const {
+  getUser,
+  getProduct
+} = require("../clients/serviceClient");
+const {
+  publishEvent
+} = require("../events/eventPublisher");
 
 const VALID_STATUSES = [
   "PENDING",
@@ -15,7 +20,10 @@ const VALID_STATUSES = [
 async function getOrders(req, res, next) {
   try {
     const orders = await orderRepository.findAll();
-    return res.status(200).json({ data: orders });
+
+    return res.status(200).json({
+      data: orders
+    });
   } catch (error) {
     next(error);
   }
@@ -23,11 +31,19 @@ async function getOrders(req, res, next) {
 
 async function getOrderById(req, res, next) {
   try {
-    const order = await orderRepository.findById(req.params.orderId);
+    const order = await orderRepository.findById(
+      req.params.orderId
+    );
+
     if (!order) {
-      return res.status(404).json({ error: "Order not found" });
+      return res.status(404).json({
+        error: "Order not found"
+      });
     }
-    return res.status(200).json({ data: order });
+
+    return res.status(200).json({
+      data: order
+    });
   } catch (error) {
     next(error);
   }
@@ -35,8 +51,26 @@ async function getOrderById(req, res, next) {
 
 async function getOrdersByCustomer(req, res, next) {
   try {
-    const orders = await orderRepository.findByCustomerId(req.params.userId);
-    return res.status(200).json({ data: orders });
+    const requestedCustomerId = req.params.userId;
+
+    // CUSTOMER can only view their own orders
+    if (
+      req.user.role === "CUSTOMER" &&
+      req.user.id !== requestedCustomerId
+    ) {
+      return res.status(403).json({
+        error: "You can only view your own orders"
+      });
+    }
+
+    const orders =
+      await orderRepository.findByCustomerId(
+        requestedCustomerId
+      );
+
+    return res.status(200).json({
+      data: orders
+    });
   } catch (error) {
     next(error);
   }
@@ -51,13 +85,20 @@ async function createOrder(req, res) {
       currency = "GBP"
     } = req.body;
 
+    // =====================================================
+    // 1. BASIC VALIDATION
+    // =====================================================
+
     if (!customerId) {
       return res.status(400).json({
         error: "customerId is required"
       });
     }
 
-    if (!Array.isArray(items) || items.length === 0) {
+    if (
+      !Array.isArray(items) ||
+      items.length === 0
+    ) {
       return res.status(400).json({
         error: "At least one order item is required"
       });
@@ -69,16 +110,43 @@ async function createOrder(req, res) {
       });
     }
 
-    // 1. Verify customer exists
-    const customer = await getUser(customerId);
+    // =====================================================
+    // 2. CUSTOMER AUTHORIZATION
+    // =====================================================
+
+    // CUSTOMER can only create orders for themselves.
+    // ADMIN and STAFF are allowed to create orders
+    // for another customer.
+    if (
+      req.user.role === "CUSTOMER" &&
+      req.user.id !== customerId
+    ) {
+      return res.status(403).json({
+        error: "You can only create orders for yourself"
+      });
+    }
+
+    // =====================================================
+    // 3. VERIFY CUSTOMER THROUGH USER SERVICE
+    // =====================================================
+
+    const customer = await getUser(
+      customerId,
+      req.headers.authorization
+    );
+
     if (!customer) {
       return res.status(400).json({
         error: "Customer does not exist"
       });
     }
 
-    // 2. Validate products and obtain authoritative prices
+    // =====================================================
+    // 4. VALIDATE PRODUCTS AND GET AUTHORITATIVE PRICES
+    // =====================================================
+
     const orderItems = [];
+
     for (const item of items) {
       if (
         !item.productId ||
@@ -86,19 +154,30 @@ async function createOrder(req, res) {
         item.quantity <= 0
       ) {
         return res.status(400).json({
-          error: "Each item requires a valid productId and positive integer quantity"
+          error:
+            "Each item requires a valid productId and positive integer quantity"
         });
       }
 
-      const product = await getProduct(item.productId);
+      const product = await getProduct(
+        item.productId
+      );
+
       if (!product) {
         return res.status(400).json({
-          error: `Product ${item.productId} does not exist`
+          error:
+            `Product ${item.productId} does not exist`
         });
       }
 
       const unitPrice = Number(product.price);
-      const subtotal = Number((unitPrice * item.quantity).toFixed(2));
+
+      const subtotal = Number(
+        (
+          unitPrice * item.quantity
+        ).toFixed(2)
+      );
+
       orderItems.push({
         productId: product.productId,
         quantity: item.quantity,
@@ -107,12 +186,24 @@ async function createOrder(req, res) {
       });
     }
 
-    // 3. Calculate total using Product Service prices
+    // =====================================================
+    // 5. CALCULATE TOTAL
+    // =====================================================
+
     const totalAmount = Number(
-      orderItems.reduce((total, item) => total + item.subtotal, 0).toFixed(2)
+      orderItems
+        .reduce(
+          (total, item) =>
+            total + item.subtotal,
+          0
+        )
+        .toFixed(2)
     );
 
-    // 4. Create order
+    // =====================================================
+    // 6. CREATE ORDER
+    // =====================================================
+
     const order = {
       orderId: `ORD${Date.now()}`,
       customerId,
@@ -124,50 +215,122 @@ async function createOrder(req, res) {
       createdAt: new Date().toISOString()
     };
 
-    const createdOrder = await orderRepository.create(order);
+    const createdOrder =
+      await orderRepository.create(order);
 
-    // Publish event after successful creation
+    // =====================================================
+    // 7. PUBLISH ORDER CREATED EVENT
+    // =====================================================
+
     publishEvent(
       "OrderCreated",
       {
-        orderId: createdOrder.orderId,
-        customerId: createdOrder.customerId,
-        totalAmount: createdOrder.totalAmount,
-        currency: createdOrder.currency,
-        items: createdOrder.items
+        orderId:
+          createdOrder.orderId,
+
+        customerId:
+          createdOrder.customerId,
+
+        totalAmount:
+          createdOrder.totalAmount,
+
+        currency:
+          createdOrder.currency,
+
+        items:
+          createdOrder.items
       }
     );
+
+    // =====================================================
+    // 8. RETURN CREATED ORDER
+    // =====================================================
 
     return res.status(201).json({
       data: createdOrder
     });
+
   } catch (error) {
-    console.error("Create order error:", error);
+    console.error(
+      "Create order error:",
+      error
+    );
+
     return res.status(500).json({
       error: "Failed to create order"
     });
   }
 }
 
-async function updateOrderStatus(req, res, next) {
+async function updateOrderStatus(
+  req,
+  res,
+  next
+) {
   const { status } = req.body;
+
+  // =====================================================
+  // 1. VALIDATE STATUS
+  // =====================================================
+
   if (!status) {
-    return res.status(400).json({ error: "status is required" });
-  }
-  if (!VALID_STATUSES.includes(status)) {
     return res.status(400).json({
-      error: `Invalid status. Allowed values: ${VALID_STATUSES.join(", ")}`
+      error: "status is required"
+    });
+  }
+
+  if (
+    !VALID_STATUSES.includes(status)
+  ) {
+    return res.status(400).json({
+      error:
+        `Invalid status. Allowed values: ${VALID_STATUSES.join(", ")}`
     });
   }
 
   try {
-    const order = await orderRepository.findById(req.params.orderId);
+    // =====================================================
+    // 2. CHECK ORDER EXISTS
+    // =====================================================
+
+    const order =
+      await orderRepository.findById(
+        req.params.orderId
+      );
+
     if (!order) {
-      return res.status(404).json({ error: "Order not found" });
+      return res.status(404).json({
+        error: "Order not found"
+      });
     }
 
-    const updatedOrder = await orderRepository.updateStatus(req.params.orderId, status);
-    return res.status(200).json({ data: updatedOrder });
+    // =====================================================
+    // 3. CUSTOMERS CANNOT CHANGE ORDER STATUS
+    // =====================================================
+
+    if (
+      req.user.role === "CUSTOMER"
+    ) {
+      return res.status(403).json({
+        error:
+          "Customers cannot update order status"
+      });
+    }
+
+    // =====================================================
+    // 4. UPDATE STATUS
+    // =====================================================
+
+    const updatedOrder =
+      await orderRepository.updateStatus(
+        req.params.orderId,
+        status
+      );
+
+    return res.status(200).json({
+      data: updatedOrder
+    });
+
   } catch (error) {
     next(error);
   }

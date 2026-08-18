@@ -38,7 +38,7 @@ function publishEvent(eventType, data) {
       .toString(36)
       .substring(2, 8)}`,
     eventType,
-    source: "inventory-service",
+    source: "order-service",
     timestamp: new Date().toISOString(),
     data
   };

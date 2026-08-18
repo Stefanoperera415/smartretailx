@@ -4,9 +4,19 @@ const USER_SERVICE_URL =
 const PRODUCT_SERVICE_URL =
   process.env.PRODUCT_SERVICE_URL || "http://localhost:3002";
 
-async function getUser(userId) {
+async function getUser(userId, authorizationHeader) {
+  const headers = {};
+
+  if (authorizationHeader) {
+    headers.Authorization = authorizationHeader;
+  }
+
   const response = await fetch(
-    `${USER_SERVICE_URL}/api/v1/users/${encodeURIComponent(userId)}`
+    `${USER_SERVICE_URL}/api/v1/users/${encodeURIComponent(userId)}`,
+    {
+      method: "GET",
+      headers
+    }
   );
 
   if (response.status === 404) {
