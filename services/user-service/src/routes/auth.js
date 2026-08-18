@@ -68,7 +68,7 @@ router.post("/register-admin",  async (req, res) => {
   }
 });
 
-// Login (unchanged)
+// Login
 router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -93,6 +93,11 @@ router.post("/login", async (req, res) => {
     console.error(err);
     res.status(500).json({ error: "Login failed" });
   }
+});
+
+// Logout – client discards token; we just send a success response
+router.post("/logout", (req, res) => {
+  res.status(200).json({ message: "Logged out successfully" });
 });
 
 module.exports = router;

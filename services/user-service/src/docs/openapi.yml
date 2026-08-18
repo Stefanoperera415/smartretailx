@@ -13,7 +13,7 @@ tags:
   - name: Users
     description: User management operations
   - name: Authentication
-    description: Login and registration
+    description: Login , logout and registration
 
 paths:
   /auth/register:
@@ -159,6 +159,23 @@ paths:
           description: Missing email or password
         '401':
           description: Invalid credentials
+
+  /auth/logout:
+    post:
+      tags:
+        - Authentication
+      summary: Log out (client discards token)
+      responses:
+        '200':
+          description: Successfully logged out
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Logged out successfully"
 
   /api/v1/users:
     get:
