@@ -203,6 +203,9 @@ services:
 
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672
 
+      JWT_SECRET: ${JWT_SECRET}
+  
+
     ports:
       - "3003:3003"
 
