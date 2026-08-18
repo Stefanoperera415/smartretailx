@@ -1,67 +1,95 @@
 const { pool } = require("../config/database");
+const bcrypt = require("bcrypt");
+
+// Helper to map DB row to camelCase (excluding password_hash)
+function mapUser(row) {
+  if (!row) return null;
+  return {
+    id: row.user_id,
+    email: row.email,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    phone: row.phone,
+    role: row.role,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 
 async function findAll() {
   const [rows] = await pool.execute(`
     SELECT
-      user_id AS id,
+      user_id,
       email,
-      first_name AS firstName,
-      last_name AS lastName,
+      first_name,
+      last_name,
       phone,
       role,
       status,
-      created_at AS createdAt,
-      updated_at AS updatedAt
+      created_at,
+      updated_at
     FROM users
     ORDER BY created_at DESC
   `);
-
-  return rows;
+  return rows.map(mapUser);
 }
 
 async function findById(id) {
   const [rows] = await pool.execute(
     `
     SELECT
-      user_id AS id,
+      user_id,
       email,
-      first_name AS firstName,
-      last_name AS lastName,
+      first_name,
+      last_name,
       phone,
       role,
       status,
-      created_at AS createdAt,
-      updated_at AS updatedAt
+      created_at,
+      updated_at
     FROM users
     WHERE user_id = ?
     `,
     [id]
   );
-
-  return rows[0] || null;
+  return mapUser(rows[0]);
 }
 
 async function findByEmail(email) {
   const [rows] = await pool.execute(
     `
     SELECT
-      user_id AS id,
+      user_id,
       email,
-      first_name AS firstName,
-      last_name AS lastName,
+      first_name,
+      last_name,
       phone,
       role,
-      status
+      status,
+      password_hash
     FROM users
     WHERE email = ?
     `,
     [email]
   );
-
-  return rows[0] || null;
+  const row = rows[0];
+  if (!row) return null;
+  // Return full row including hash for authentication
+  return {
+    id: row.user_id,
+    email: row.email,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    phone: row.phone,
+    role: row.role,
+    status: row.status,
+    passwordHash: row.password_hash,
+  };
 }
 
 async function create(user) {
+  const hashedPassword = await bcrypt.hash(user.password, 10);
   await pool.execute(
     `
     INSERT INTO users
@@ -72,9 +100,10 @@ async function create(user) {
       last_name,
       phone,
       role,
-      status
+      status,
+      password_hash
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `,
     [
       user.id,
@@ -83,10 +112,10 @@ async function create(user) {
       user.lastName,
       user.phone || null,
       user.role || "CUSTOMER",
-      user.status || "ACTIVE"
+      user.status || "ACTIVE",
+      hashedPassword,
     ]
   );
-
   return findById(user.id);
 }
 
@@ -100,13 +129,21 @@ async function update(id, updates) {
     lastName: "last_name",
     phone: "phone",
     role: "role",
-    status: "status"
+    status: "status",
+    password: "password_hash", // special handling
   };
 
   for (const [key, column] of Object.entries(mapping)) {
     if (updates[key] !== undefined) {
-      fields.push(`${column} = ?`);
-      values.push(updates[key]);
+      if (key === "password") {
+        // Hash the new password
+        const hashed = await bcrypt.hash(updates.password, 10);
+        fields.push(`${column} = ?`);
+        values.push(hashed);
+      } else {
+        fields.push(`${column} = ?`);
+        values.push(updates[key]);
+      }
     }
   }
 
@@ -133,7 +170,6 @@ async function remove(id) {
     "DELETE FROM users WHERE user_id = ?",
     [id]
   );
-
   return result.affectedRows > 0;
 }
 
@@ -143,5 +179,5 @@ module.exports = {
   findByEmail,
   create,
   update,
-  remove
+  remove,
 };
