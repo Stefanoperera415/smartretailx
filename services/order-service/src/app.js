@@ -1,14 +1,15 @@
+require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
-require("dotenv").config();
-const { connectRabbitMQ } = require("./config/rabbitmq");
-const { startOrderConsumer } = require("./events/orderConsumer");
 
+const { connectEventBridge } = require("./config/eventbridge");
+const { startOrderConsumer } = require("./events/orderConsumer");
 const swaggerUi = require("swagger-ui-express");
 const YAML = require("yamljs");
 
 const orderRoutes = require("./routes/orders");
-const { connectDatabase } = require("./config/database"); // ✅ added import
+const { connectDatabase } = require("./config/database");
 
 const app = express();
 const PORT = process.env.PORT || 3003;
@@ -30,7 +31,11 @@ app.get("/health", (req, res) => {
 });
 
 // Swagger UI
-app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+app.use(
+  "/api-docs",
+  swaggerUi.serve,
+  swaggerUi.setup(swaggerDocument)
+);
 
 // API routes
 app.use("/api/v1/orders", orderRoutes);
@@ -45,21 +50,27 @@ app.use((req, res) => {
 // Error handler
 app.use((err, req, res, next) => {
   console.error(err);
+
   res.status(500).json({
     error: "Internal server error",
   });
 });
 
 async function startServer() {
-  await connectRabbitMQ();
+  // Initialize EventBridge
+  await connectEventBridge();
+
+  // Connect to Aurora PostgreSQL
   await connectDatabase();
+
   await startOrderConsumer();
+
   app.listen(PORT, () => {
     console.log(`Order service running on port ${PORT}`);
   });
 }
 
-// ✅ Handle startup errors
+// Handle startup errors
 startServer().catch((err) => {
   console.error("Failed to start server:", err);
   process.exit(1);

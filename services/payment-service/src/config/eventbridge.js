@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const {
   EventBridgeClient,
   PutEventsCommand,
@@ -10,6 +12,20 @@ const eventBridge = new EventBridgeClient({
 const EVENT_BUS_NAME =
   process.env.EVENTBRIDGE_BUS_NAME || "smartretailx-events";
 
+async function connectEventBridge() {
+  try {
+    console.log("========================================");
+    console.log("Connected to Amazon EventBridge");
+    console.log("Region:", process.env.AWS_REGION || "ap-south-1");
+    console.log("Event bus:", EVENT_BUS_NAME);
+    console.log("Source: smartretailx.payment-service");
+    console.log("========================================");
+  } catch (error) {
+    console.error("EventBridge initialization failed:", error);
+    process.exit(1);
+  }
+}
+
 async function publishEvent(eventType, data) {
   const event = {
     eventId: `evt-${Date.now()}-${Math.random()
@@ -18,7 +34,7 @@ async function publishEvent(eventType, data) {
 
     eventType,
 
-    source: "smartretailx.order-service",
+    source: "smartretailx.payment-service",
 
     timestamp: new Date().toISOString(),
 
@@ -30,7 +46,7 @@ async function publishEvent(eventType, data) {
       {
         EventBusName: EVENT_BUS_NAME,
 
-        Source: "smartretailx.order-service",
+        Source: "smartretailx.payment-service",
 
         DetailType: eventType,
 
@@ -70,5 +86,7 @@ async function publishEvent(eventType, data) {
 }
 
 module.exports = {
+  connectEventBridge,
   publishEvent,
+  EVENT_BUS_NAME,
 };

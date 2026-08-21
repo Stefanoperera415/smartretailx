@@ -1,7 +1,7 @@
-const { pool } = require("../config/database");
+const database = require("../config/database");  // ← import the module, not the property
 const bcrypt = require("bcrypt");
 
-// Helper to map DB row to camelCase (excluding password_hash)
+// Helper to map DB row to camelCase
 function mapUser(row) {
   if (!row) return null;
   return {
@@ -18,7 +18,8 @@ function mapUser(row) {
 }
 
 async function findAll() {
-  const [rows] = await pool.execute(`
+  const pool = database.pool;  // get current pool
+  const result = await pool.query(`
     SELECT
       user_id,
       email,
@@ -32,11 +33,12 @@ async function findAll() {
     FROM users
     ORDER BY created_at DESC
   `);
-  return rows.map(mapUser);
+  return result.rows.map(mapUser);
 }
 
 async function findById(id) {
-  const [rows] = await pool.execute(
+  const pool = database.pool;
+  const result = await pool.query(
     `
     SELECT
       user_id,
@@ -49,15 +51,16 @@ async function findById(id) {
       created_at,
       updated_at
     FROM users
-    WHERE user_id = ?
+    WHERE user_id = $1
     `,
     [id]
   );
-  return mapUser(rows[0]);
+  return mapUser(result.rows[0]);
 }
 
 async function findByEmail(email) {
-  const [rows] = await pool.execute(
+  const pool = database.pool;
+  const result = await pool.query(
     `
     SELECT
       user_id,
@@ -69,13 +72,12 @@ async function findByEmail(email) {
       status,
       password_hash
     FROM users
-    WHERE email = ?
+    WHERE email = $1
     `,
     [email]
   );
-  const row = rows[0];
+  const row = result.rows[0];
   if (!row) return null;
-  // Return full row including hash for authentication
   return {
     id: row.user_id,
     email: row.email,
@@ -89,8 +91,9 @@ async function findByEmail(email) {
 }
 
 async function create(user) {
+  const pool = database.pool;
   const hashedPassword = await bcrypt.hash(user.password, 10);
-  await pool.execute(
+  const result = await pool.query(
     `
     INSERT INTO users
     (
@@ -103,7 +106,17 @@ async function create(user) {
       status,
       password_hash
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    RETURNING
+      user_id,
+      email,
+      first_name,
+      last_name,
+      phone,
+      role,
+      status,
+      created_at,
+      updated_at
     `,
     [
       user.id,
@@ -116,12 +129,14 @@ async function create(user) {
       hashedPassword,
     ]
   );
-  return findById(user.id);
+  return mapUser(result.rows[0]);
 }
 
 async function update(id, updates) {
+  const pool = database.pool;
   const fields = [];
   const values = [];
+  let paramIndex = 1;
 
   const mapping = {
     email: "email",
@@ -130,19 +145,20 @@ async function update(id, updates) {
     phone: "phone",
     role: "role",
     status: "status",
-    password: "password_hash", // special handling
+    password: "password_hash",
   };
 
   for (const [key, column] of Object.entries(mapping)) {
     if (updates[key] !== undefined) {
       if (key === "password") {
-        // Hash the new password
         const hashed = await bcrypt.hash(updates.password, 10);
-        fields.push(`${column} = ?`);
+        fields.push(`${column} = $${paramIndex}`);
         values.push(hashed);
+        paramIndex++;
       } else {
-        fields.push(`${column} = ?`);
+        fields.push(`${column} = $${paramIndex}`);
         values.push(updates[key]);
+        paramIndex++;
       }
     }
   }
@@ -153,24 +169,35 @@ async function update(id, updates) {
 
   values.push(id);
 
-  await pool.execute(
+  const result = await pool.query(
     `
     UPDATE users
     SET ${fields.join(", ")}
-    WHERE user_id = ?
+    WHERE user_id = $${paramIndex}
+    RETURNING
+      user_id,
+      email,
+      first_name,
+      last_name,
+      phone,
+      role,
+      status,
+      created_at,
+      updated_at
     `,
     values
   );
 
-  return findById(id);
+  return mapUser(result.rows[0]);
 }
 
 async function remove(id) {
-  const [result] = await pool.execute(
-    "DELETE FROM users WHERE user_id = ?",
+  const pool = database.pool;
+  const result = await pool.query(
+    "DELETE FROM users WHERE user_id = $1",
     [id]
   );
-  return result.affectedRows > 0;
+  return result.rowCount > 0;
 }
 
 module.exports = {

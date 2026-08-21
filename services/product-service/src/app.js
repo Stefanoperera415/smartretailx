@@ -7,7 +7,8 @@ const swaggerUi = require("swagger-ui-express");
 const YAML = require("yamljs");
 
 const productRoutes = require("./routes/products");
-const connectDatabase = require("./config/database"); // ✅ Import database connection
+const { connectDatabase } = require("./config/database");   // ✅ destructure
+const { connectEventBridge } = require("./config/eventbridge");
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -47,6 +48,7 @@ app.use((err, req, res, next) => {
 // ✅ Start server after connecting to database
 async function startServer() {
   await connectDatabase();
+  await connectEventBridge();
   app.listen(PORT, () => {
     console.log(`Product service running on port ${PORT}`);
   });

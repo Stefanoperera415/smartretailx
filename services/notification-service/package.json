@@ -12,11 +12,12 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "amqplib": "^2.0.1",
+    "@aws-sdk/client-dynamodb": "^3.675.0",
+    "@aws-sdk/client-sqs": "^3.1114.0",
+    "@aws-sdk/lib-dynamodb": "^3.675.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "mongoose": "^9.9.2",
     "swagger-ui-express": "^5.0.1",
     "yamljs": "^0.3.0"
   },

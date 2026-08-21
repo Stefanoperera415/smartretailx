@@ -1,113 +1,203 @@
-const { getChannel, EXCHANGE_NAME } = require("../config/rabbitmq");
-const Notification = require("../models/notification");
+require("dotenv").config();
+
+const { ReceiveMessageCommand, DeleteMessageCommand } = require("@aws-sdk/client-sqs");
+const { sqs, NOTIFICATION_QUEUE_URL } = require("../config/sqs");
+const notificationRepo = require("../repositories/notificationRepository");
 const { hasProcessed, markProcessed } = require("../service/idempotencyService");
-const {
-  declareResilientQueue,
-  parseEvent,
-  retryOrDeadLetter,
-  nonRetryableError
-} = require("../messaging/resilience");
 
-async function sendNotification(notification) {
-  if (process.env.SIMULATE_NOTIFICATION_FAILURE === "true") {
-    throw new Error("Simulated notification delivery failure");
-  }
-  console.log(`Sending ${notification.type} notification to customer ${notification.customerId}`);
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  notification.status = "SENT";
-  notification.sentAt = new Date();
-  await notification.save();
+// ==========================================
+// Start SQS Consumer
+// ==========================================
+async function startNotificationConsumer() {
+  console.log("========================================");
+  console.log("Starting Notification SQS consumer");
+  console.log("Queue:", NOTIFICATION_QUEUE_URL);
+  console.log("========================================");
+  pollMessages();
 }
 
-function buildNotification(event) {
-  const { orderId, customerId, amount, totalAmount, currency, reason } = event.data;
-  if (!orderId || !customerId) throw nonRetryableError("Notification event is missing orderId or customerId");
-  const value = amount === undefined ? totalAmount : amount;
+// ==========================================
+// Poll SQS (long polling)
+// ==========================================
+async function pollMessages() {
+  while (true) {
+    try {
+      const command = new ReceiveMessageCommand({
+        QueueUrl: NOTIFICATION_QUEUE_URL,
+        MaxNumberOfMessages: 10,
+        WaitTimeSeconds: 20,
+        VisibilityTimeout: 30,
+        MessageAttributeNames: ["All"],
+      });
 
-  if (event.eventType === "PaymentCompleted") {
-    return {
-      customerId, type: "PAYMENT_COMPLETED", channel: "EMAIL",
-      subject: `Payment Confirmed for Order ${orderId}`,
-      message: `Your payment of ${value} ${currency || "GBP"} for order ${orderId} was successfully processed.`,
-      metadata: { orderId, amount: value, currency: currency || "GBP", eventId: event.eventId }
-    };
+      const response = await sqs.send(command);
+      const messages = response.Messages || [];
+
+      if (messages.length === 0) continue;
+
+      for (const message of messages) {
+        await processMessage(message);
+      }
+    } catch (error) {
+      console.error("SQS polling error:", error);
+      await sleep(5000);
+    }
   }
-  if (event.eventType === "PaymentFailed") {
-    return {
-      customerId, type: "PAYMENT_FAILED", channel: "EMAIL",
-      subject: `Payment Failed for Order ${orderId}`,
-      message: `Your payment of ${value} ${currency || "GBP"} for order ${orderId} failed. Reason: ${reason || "Payment rejected"}.`,
-      metadata: { orderId, amount: value, currency: currency || "GBP", eventId: event.eventId }
-    };
-  }
-  if (event.eventType === "OrderConfirmed") {
-    return {
-      customerId, type: "ORDER_CONFIRMED", channel: "EMAIL",
-      subject: `Order ${orderId} Confirmed`,
-      message: `Your order ${orderId} has been confirmed. Total: ${value} ${currency || "GBP"}.`,
-      metadata: { orderId, amount: value, currency: currency || "GBP", eventId: event.eventId }
-    };
-  }
-  if (event.eventType === "OrderFailed") {
-    return {
-      customerId, type: "ORDER_FAILED", channel: "EMAIL",
-      subject: `Order ${orderId} Failed`,
-      message: `Your order ${orderId} could not be completed due to an inventory issue.`,
-      metadata: { orderId, eventId: event.eventId }
-    };
-  }
-  throw nonRetryableError(`Unsupported notification event type: ${event.eventType}`);
 }
 
-async function processNotification(channel, message, queueConfig) {
+// ==========================================
+// Process Individual Message
+// ==========================================
+async function processMessage(message) {
   try {
-    const event = parseEvent(message);
-    if (await hasProcessed(event.eventId)) {
-      console.log(`Duplicate notification event ignored: ${event.eventId}`);
-      channel.ack(message);
+    console.log("----------------------------------------");
+    console.log("Received Notification SQS message");
+
+    // 1) Parse the SQS body (EventBridge envelope)
+    const rawEvent = JSON.parse(message.Body);
+    console.log("Raw EventBridge event:", JSON.stringify(rawEvent, null, 2));
+
+    // 2) Extract the event from the "detail" field
+    const detail = rawEvent.detail;
+    if (!detail) throw new Error("EventBridge message missing 'detail' field");
+
+    const eventType = detail.eventType || rawEvent["detail-type"];
+    const eventId = detail.eventId;
+    const data = detail.data;
+
+    if (!eventId) throw new Error("Event missing eventId");
+    if (!eventType) throw new Error("Event missing eventType");
+    if (!data || typeof data !== "object") throw new Error("Event missing data");
+
+    console.log("Event type:", eventType);
+
+    // 3) Handle supported event types
+    if (eventType === "OrderCreated") {
+      await handleOrderCreated(data, eventId, eventType);
+    } else if (eventType === "PaymentCompleted") {
+      await handlePaymentCompleted(data, eventId, eventType);
+    } else if (eventType === "PaymentFailed") {
+      await handlePaymentFailed(data, eventId, eventType);
+    } else {
+      console.log(`Ignoring unsupported event type: ${eventType}`);
+      await deleteMessage(message);
       return;
     }
 
-    const payload = buildNotification(event);
-    let notification = await Notification.findOne({ eventId: event.eventId });
-    if (!notification) {
-      notification = await Notification.create({ eventId: event.eventId, ...payload });
-    }
+    // 4) Mark as processed (idempotency)
+    await markProcessed(eventId, eventType);
 
-    if (notification.status !== "SENT") {
-      notification.status = "PENDING";
-      await notification.save();
-      await sendNotification(notification);
-    }
-
-    await markProcessed(event.eventId, event.eventType);
-    console.log(`Notification processed: ${event.eventId}`);
-    channel.ack(message);
+    // 5) Delete the SQS message
+    await deleteMessage(message);
+    console.log("Notification SQS message deleted successfully");
+    console.log("----------------------------------------");
   } catch (error) {
-    console.error("Notification consumer error:", error.message);
-    await retryOrDeadLetter(channel, message, queueConfig, error);
+    console.error("Notification consumer error:", error);
+    // Do NOT delete the message – SQS will retry after visibility timeout
+    console.error("Message will remain in SQS and will be retried.");
   }
 }
 
-async function startNotificationConsumer() {
-  const channel = getChannel();
-  await channel.prefetch(1);
-  const paymentQueue = await declareResilientQueue(
-    channel, "notification.payment-events", EXCHANGE_NAME,
-    ["paymentcompleted", "paymentfailed"]
-  );
-  const orderQueue = await declareResilientQueue(
-    channel, "notification.order-events", EXCHANGE_NAME,
-    ["orderconfirmed", "orderfailed"]
-  );
+// ==========================================
+// Handle OrderCreated
+// ==========================================
+async function handleOrderCreated(data, eventId, eventType) {
+  if (await hasProcessed(eventId)) {
+    console.log(`Duplicate event ignored: ${eventId}`);
+    return;
+  }
 
-  await channel.consume(paymentQueue.queueName, (message) =>
-    message && processNotification(channel, message, paymentQueue)
-  );
-  await channel.consume(orderQueue.queueName, (message) =>
-    message && processNotification(channel, message, orderQueue)
-  );
-  console.log("Notification consumers started");
+  const { orderId, customerId, totalAmount, currency } = data;
+  if (!orderId || !customerId) {
+    throw new Error("OrderCreated missing orderId or customerId");
+  }
+
+  const notification = {
+    notificationId: `NOTIF${Date.now()}`,
+    eventId,
+    customerId,
+    type: "ORDER_CREATED",
+    channel: "EMAIL",
+    message: `Your order ${orderId} has been created. Total: ${totalAmount} ${currency || "GBP"}.`,
+    metadata: { orderId, totalAmount, currency },
+    status: "PENDING",
+  };
+
+  await notificationRepo.create(notification);
+  console.log(`Notification created for OrderCreated: ${orderId}`);
+}
+
+// ==========================================
+// Handle PaymentCompleted
+// ==========================================
+async function handlePaymentCompleted(data, eventId, eventType) {
+  if (await hasProcessed(eventId)) {
+    console.log(`Duplicate event ignored: ${eventId}`);
+    return;
+  }
+
+  const { orderId, customerId, amount, currency } = data;
+  if (!orderId || !customerId) {
+    throw new Error("PaymentCompleted missing orderId or customerId");
+  }
+
+  const notification = {
+    notificationId: `NOTIF${Date.now()}`,
+    eventId,
+    customerId,
+    type: "PAYMENT_COMPLETED",
+    channel: "EMAIL",
+    message: `Your payment of ${amount} ${currency || "GBP"} for order ${orderId} was successful.`,
+    metadata: { orderId, amount, currency },
+    status: "PENDING",
+  };
+
+  await notificationRepo.create(notification);
+  console.log(`Notification created for PaymentCompleted: ${orderId}`);
+}
+
+// ==========================================
+// Handle PaymentFailed
+// ==========================================
+async function handlePaymentFailed(data, eventId, eventType) {
+  if (await hasProcessed(eventId)) {
+    console.log(`Duplicate event ignored: ${eventId}`);
+    return;
+  }
+
+  const { orderId, customerId, amount, currency, reason } = data;
+  if (!orderId || !customerId) {
+    throw new Error("PaymentFailed missing orderId or customerId");
+  }
+
+  const notification = {
+    notificationId: `NOTIF${Date.now()}`,
+    eventId,
+    customerId,
+    type: "PAYMENT_FAILED",
+    channel: "EMAIL",
+    message: `Your payment of ${amount} ${currency || "GBP"} for order ${orderId} failed. Reason: ${reason || "Payment rejected"}.`,
+    metadata: { orderId, amount, currency, reason },
+    status: "PENDING",
+  };
+
+  await notificationRepo.create(notification);
+  console.log(`Notification created for PaymentFailed: ${orderId}`);
+}
+
+// ==========================================
+// Delete SQS Message
+// ==========================================
+async function deleteMessage(message) {
+  const command = new DeleteMessageCommand({
+    QueueUrl: NOTIFICATION_QUEUE_URL,
+    ReceiptHandle: message.ReceiptHandle,
+  });
+  await sqs.send(command);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 module.exports = { startNotificationConsumer };

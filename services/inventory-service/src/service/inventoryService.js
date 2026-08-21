@@ -1,89 +1,19 @@
-const Inventory = require("../models/inventory");
+const inventoryRepo = require("../repositories/inventoryRepository");
 
 async function reserveStock(productId, warehouseId, quantity) {
   const numericQuantity = Number(quantity);
-
-  if (
-    !productId ||
-    !warehouseId ||
-    !Number.isInteger(numericQuantity) ||
-    numericQuantity <= 0
-  ) {
-    throw new Error(
-      `Invalid inventory reservation: productId=${productId}, warehouseId=${warehouseId}, quantity=${quantity}`
-    );
+  if (!productId || !warehouseId || !Number.isInteger(numericQuantity) || numericQuantity <= 0) {
+    throw new Error(`Invalid inventory reservation`);
   }
-
-  const inventory = await Inventory.findOneAndUpdate(
-    {
-      productId: String(productId),
-      warehouseId: String(warehouseId),
-
-      $expr: {
-        $gte: [
-          {
-            $subtract: [
-              "$quantity",
-              {
-                $ifNull: ["$reservedQuantity", 0]
-              }
-            ]
-          },
-          numericQuantity
-        ]
-      }
-    },
-    {
-      $inc: {
-        reservedQuantity: numericQuantity
-      }
-    },
-    {
-      returnDocument: "after"
-    }
-  );
-
-  return inventory;
+  return inventoryRepo.reserveStock(productId, warehouseId, numericQuantity);
 }
 
-async function releaseStock(
-  productId,
-  warehouseId,
-  quantity
-) {
+async function releaseStock(productId, warehouseId, quantity) {
   const numericQuantity = Number(quantity);
-
-  if (
-    !productId ||
-    !warehouseId ||
-    !Number.isInteger(numericQuantity) ||
-    numericQuantity <= 0
-  ) {
-    throw new Error(
-      `Invalid inventory release: productId=${productId}, warehouseId=${warehouseId}, quantity=${quantity}`
-    );
+  if (!productId || !warehouseId || !Number.isInteger(numericQuantity) || numericQuantity <= 0) {
+    throw new Error(`Invalid inventory release`);
   }
-
-  return Inventory.findOneAndUpdate(
-    {
-      productId: String(productId),
-      warehouseId: String(warehouseId),
-      reservedQuantity: {
-        $gte: numericQuantity
-      }
-    },
-    {
-      $inc: {
-        reservedQuantity: -numericQuantity
-      }
-    },
-    {
-      returnDocument: "after"
-    }
-  );
+  return inventoryRepo.releaseStock(productId, warehouseId, numericQuantity);
 }
 
-module.exports = {
-  reserveStock,
-  releaseStock
-};
+module.exports = { reserveStock, releaseStock };

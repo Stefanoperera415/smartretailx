@@ -1,0 +1,39 @@
+require("dotenv").config();
+const { EventBridgeClient, PutEventsCommand } = require("@aws-sdk/client-eventbridge");
+
+const client = new EventBridgeClient({
+  region: process.env.AWS_REGION || "ap-south-1",
+});
+
+async function publishOrderCreated() {
+  const order = {
+    orderId: `ORD-${Date.now()}`,
+    customerId: "CUST-001",
+    totalAmount: 5000,          // < 10000 => payment succeeds
+    currency: "GBP",
+    items: [{ productId: "P001", quantity: 2 }],
+    warehouseId: "WH01"
+  };
+
+  const event = {
+    eventId: `evt-${Date.now()}`,
+    eventType: "OrderCreated",
+    source: "smartretailx.order-service",
+    timestamp: new Date().toISOString(),
+    data: order
+  };
+
+  const command = new PutEventsCommand({
+    Entries: [{
+      EventBusName: process.env.EVENTBRIDGE_BUS_NAME || "smartretailx-events",
+      Source: "smartretailx.order-service",
+      DetailType: "OrderCreated",
+      Detail: JSON.stringify(event)
+    }]
+  });
+
+  const response = await client.send(command);
+  console.log("OrderCreated published. Response:", JSON.stringify(response, null, 2));
+}
+
+publishOrderCreated().catch(console.error);

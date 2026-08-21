@@ -12,11 +12,14 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "amqplib": "^2.0.1",
+    "@aws-sdk/client-eventbridge": "^3.1114.0",
+    "@aws-sdk/client-sqs": "^3.1114.0",
+    "@aws-sdk/rds-signer": "^3.1113.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "mysql2": "^3.23.3",
+    "pg": "^8.23.0",
+    "stripe": "^17.0.0",
     "swagger-ui-express": "^5.0.1",
     "yamljs": "^0.3.0"
   },

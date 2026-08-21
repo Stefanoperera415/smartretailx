@@ -2,7 +2,9 @@ openapi: 3.0.3
 
 info:
   title: SmartRetailX Product Catalogue API
-  description: Product catalogue management API for SmartRetailX.
+  description: |
+    Product catalogue management API for SmartRetailX.  
+    **New:** When a product is created with `initialStock`, an inventory record is automatically created (via EventBridge) in the inventory service.
   version: 1.0.0
 
 servers:
@@ -14,12 +16,9 @@ tags:
     description: Product catalogue operations
 
 paths:
-
   /api/v1/products:
-
     get:
-      tags:
-        - Products
+      tags: [Products]
       summary: Get all products
       responses:
         "200":
@@ -35,19 +34,63 @@ paths:
                       $ref: "#/components/schemas/Product"
 
     post:
-      tags:
-        - Products
-      summary: Create a product
+      tags: [Products]
+      summary: Create a new product with an optional image
+      description: |
+        Creates a product and publishes a `ProductCreated` event.
+        If `initialStock` is provided, the inventory service will automatically create an inventory record for this product in the specified warehouse (default: `WH01`).
       requestBody:
         required: true
         content:
-          application/json:
+          multipart/form-data:
             schema:
-              $ref: "#/components/schemas/CreateProductRequest"
-
+              type: object
+              required:
+                - name
+                - categoryId
+                - description
+                - price
+              properties:
+                name:
+                  type: string
+                  example: Organic Milk
+                categoryId:
+                  type: string
+                  example: CAT001
+                description:
+                  type: string
+                  example: 1 litre organic whole milk
+                price:
+                  type: number
+                  format: double
+                  minimum: 0
+                  example: 2.99
+                currency:
+                  type: string
+                  default: GBP
+                  example: GBP
+                status:
+                  type: string
+                  enum: [ACTIVE, INACTIVE]
+                  default: ACTIVE
+                image:
+                  type: string
+                  format: binary
+                  description: Product image file (jpeg, png, gif, webp)
+                initialStock:
+                  type: integer
+                  minimum: 0
+                  default: 0
+                  description: Initial stock quantity to reserve for this product. If provided, inventory is automatically created.
+                  example: 50
+                warehouseId:
+                  type: string
+                  default: "WH01"
+                  description: Warehouse where the product will be stocked. Defaults to WH01.
+                  example: WH01
       responses:
         "201":
-          description: Product created successfully
+          description: Product created successfully (inventory record will be created asynchronously)
           content:
             application/json:
               schema:
@@ -55,28 +98,22 @@ paths:
                 properties:
                   data:
                     $ref: "#/components/schemas/Product"
-
         "400":
           description: Invalid request
-
         "409":
-          description: Product already exists
-
+          description: Product name already exists
 
   /api/v1/products/{productId}:
-
     parameters:
       - name: productId
         in: path
         required: true
-        description: Product identifier
         schema:
           type: string
         example: P001
 
     get:
-      tags:
-        - Products
+      tags: [Products]
       summary: Get product by ID
       responses:
         "200":
@@ -88,48 +125,78 @@ paths:
                 properties:
                   data:
                     $ref: "#/components/schemas/Product"
-
         "404":
           description: Product not found
 
     put:
-      tags:
-        - Products
-      summary: Update a product
+      tags: [Products]
+      summary: Update product details – optionally replace or remove the image
       requestBody:
         required: true
         content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: New product name
+                categoryId:
+                  type: string
+                description:
+                  type: string
+                price:
+                  type: number
+                  format: double
+                  minimum: 0
+                currency:
+                  type: string
+                status:
+                  type: string
+                  enum: [ACTIVE, INACTIVE]
+                image:
+                  type: string
+                  format: binary
+                  description: New image file – if provided, replaces the old one
+                removeImage:
+                  type: boolean
+                  description: Set to `true` to delete the current image without replacing it.
+                  default: false
           application/json:
             schema:
               $ref: "#/components/schemas/UpdateProductRequest"
-
       responses:
         "200":
           description: Product updated successfully
-
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Product"
         "400":
           description: Invalid request
-
         "404":
           description: Product not found
 
     delete:
-      tags:
-        - Products
-      summary: Delete a product
-
+      tags: [Products]
+      summary: Delete a product (also removes image from S3)
       responses:
         "204":
           description: Product deleted successfully
-
         "404":
           description: Product not found
 
-
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
 
   schemas:
-
     Product:
       type: object
       required:
@@ -140,130 +207,58 @@ components:
         - price
         - currency
         - status
-
       properties:
-
         productId:
           type: string
           example: P001
-
         name:
           type: string
           example: Organic Milk
-
         categoryId:
           type: string
           example: CAT001
-
         description:
           type: string
           example: 1 litre organic whole milk
-
         price:
           type: number
           format: double
           minimum: 0
           example: 2.99
-
         currency:
           type: string
           example: GBP
-
         imageUrl:
           type: string
           nullable: true
-          example: https://example.com/products/P001.jpg
-
+          description: Signed S3 URL (or S3 key if not enriched)
+          example: https://s3..../products/P001/123456.jpg?...
         status:
           type: string
-          enum:
-            - ACTIVE
-            - INACTIVE
+          enum: [ACTIVE, INACTIVE]
           example: ACTIVE
-
         createdAt:
           type: string
           format: date-time
-
         updatedAt:
           type: string
           format: date-time
 
-
-    CreateProductRequest:
-      type: object
-      required:
-        - name
-        - categoryId
-        - description
-        - price
-
-      properties:
-
-        name:
-          type: string
-          example: Organic Milk
-
-        categoryId:
-          type: string
-          example: CAT001
-
-        description:
-          type: string
-          example: 1 litre organic whole milk
-
-        price:
-          type: number
-          format: double
-          minimum: 0
-          example: 2.99
-
-        currency:
-          type: string
-          default: GBP
-          example: GBP
-
-        imageUrl:
-          type: string
-          nullable: true
-          example: https://example.com/products/P001.jpg
-
-        status:
-          type: string
-          enum:
-            - ACTIVE
-            - INACTIVE
-          default: ACTIVE
-
-
     UpdateProductRequest:
       type: object
-
       properties:
-
         name:
           type: string
-
         categoryId:
           type: string
-
         description:
           type: string
-
         price:
           type: number
           format: double
           minimum: 0
-
         currency:
           type: string
-
-        imageUrl:
-          type: string
-          nullable: true
-
         status:
           type: string
-          enum:
-            - ACTIVE
-            - INACTIVE
+          enum: [ACTIVE, INACTIVE]

@@ -1,17 +1,11 @@
-const ProcessedEvent = require("../models/processEvents");
+const processedEventRepo = require("../repositories/processedEventRepository");
 
 async function hasProcessed(eventId) {
-  return Boolean(await ProcessedEvent.exists({ eventId }));
+  return processedEventRepo.hasProcessed(eventId);
 }
 
 async function markProcessed(eventId, eventType) {
-  try {
-    await ProcessedEvent.create({ eventId, eventType });
-    return true;
-  } catch (error) {
-    if (error.code === 11000) return false;
-    throw error;
-  }
+  return processedEventRepo.markProcessed(eventId, eventType);
 }
 
 module.exports = { hasProcessed, markProcessed };

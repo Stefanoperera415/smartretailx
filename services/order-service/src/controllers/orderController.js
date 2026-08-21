@@ -20,10 +20,7 @@ const VALID_STATUSES = [
 async function getOrders(req, res, next) {
   try {
     const orders = await orderRepository.findAll();
-
-    return res.status(200).json({
-      data: orders
-    });
+    return res.status(200).json({ data: orders });
   } catch (error) {
     next(error);
   }
@@ -31,19 +28,11 @@ async function getOrders(req, res, next) {
 
 async function getOrderById(req, res, next) {
   try {
-    const order = await orderRepository.findById(
-      req.params.orderId
-    );
-
+    const order = await orderRepository.findById(req.params.orderId);
     if (!order) {
-      return res.status(404).json({
-        error: "Order not found"
-      });
+      return res.status(404).json({ error: "Order not found" });
     }
-
-    return res.status(200).json({
-      data: order
-    });
+    return res.status(200).json({ data: order });
   } catch (error) {
     next(error);
   }
@@ -52,25 +41,11 @@ async function getOrderById(req, res, next) {
 async function getOrdersByCustomer(req, res, next) {
   try {
     const requestedCustomerId = req.params.userId;
-
-    // CUSTOMER can only view their own orders
-    if (
-      req.user.role === "CUSTOMER" &&
-      req.user.id !== requestedCustomerId
-    ) {
-      return res.status(403).json({
-        error: "You can only view your own orders"
-      });
+    if (req.user.role === "CUSTOMER" && req.user.id !== requestedCustomerId) {
+      return res.status(403).json({ error: "You can only view your own orders" });
     }
-
-    const orders =
-      await orderRepository.findByCustomerId(
-        requestedCustomerId
-      );
-
-    return res.status(200).json({
-      data: orders
-    });
+    const orders = await orderRepository.findByCustomerId(requestedCustomerId);
+    return res.status(200).json({ data: orders });
   } catch (error) {
     next(error);
   }
@@ -78,106 +53,59 @@ async function getOrdersByCustomer(req, res, next) {
 
 async function createOrder(req, res) {
   try {
+    // =====================================================
+    // 1. EXTRACT FIELDS, INCLUDING WAREHOUSE ID
+    // =====================================================
     const {
       customerId,
       items,
       shippingAddress,
-      currency = "GBP"
+      currency = "GBP",
+      warehouseId  // 👈 extract warehouseId from request
     } = req.body;
 
     // =====================================================
-    // 1. BASIC VALIDATION
+    // 2. BASIC VALIDATION
     // =====================================================
-
     if (!customerId) {
-      return res.status(400).json({
-        error: "customerId is required"
-      });
+      return res.status(400).json({ error: "customerId is required" });
     }
-
-    if (
-      !Array.isArray(items) ||
-      items.length === 0
-    ) {
-      return res.status(400).json({
-        error: "At least one order item is required"
-      });
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "At least one order item is required" });
     }
-
     if (!shippingAddress) {
-      return res.status(400).json({
-        error: "shippingAddress is required"
-      });
+      return res.status(400).json({ error: "shippingAddress is required" });
     }
 
     // =====================================================
-    // 2. CUSTOMER AUTHORIZATION
+    // 3. CUSTOMER AUTHORIZATION
     // =====================================================
-
-    // CUSTOMER can only create orders for themselves.
-    // ADMIN and STAFF are allowed to create orders
-    // for another customer.
-    if (
-      req.user.role === "CUSTOMER" &&
-      req.user.id !== customerId
-    ) {
-      return res.status(403).json({
-        error: "You can only create orders for yourself"
-      });
+    if (req.user.role === "CUSTOMER" && req.user.id !== customerId) {
+      return res.status(403).json({ error: "You can only create orders for yourself" });
     }
 
     // =====================================================
-    // 3. VERIFY CUSTOMER THROUGH USER SERVICE
+    // 4. VERIFY CUSTOMER
     // =====================================================
-
-    const customer = await getUser(
-      customerId,
-      req.headers.authorization
-    );
-
+    const customer = await getUser(customerId, req.headers.authorization);
     if (!customer) {
-      return res.status(400).json({
-        error: "Customer does not exist"
-      });
+      return res.status(400).json({ error: "Customer does not exist" });
     }
 
     // =====================================================
-    // 4. VALIDATE PRODUCTS AND GET AUTHORITATIVE PRICES
+    // 5. VALIDATE PRODUCTS AND GET PRICES
     // =====================================================
-
     const orderItems = [];
-
     for (const item of items) {
-      if (
-        !item.productId ||
-        !Number.isInteger(item.quantity) ||
-        item.quantity <= 0
-      ) {
-        return res.status(400).json({
-          error:
-            "Each item requires a valid productId and positive integer quantity"
-        });
+      if (!item.productId || !Number.isInteger(item.quantity) || item.quantity <= 0) {
+        return res.status(400).json({ error: "Each item requires a valid productId and positive integer quantity" });
       }
-
-      const product = await getProduct(
-        item.productId
-      );
-
+      const product = await getProduct(item.productId);
       if (!product) {
-        return res.status(400).json({
-          error:
-            `Product ${item.productId} does not exist`
-        });
+        return res.status(400).json({ error: `Product ${item.productId} does not exist` });
       }
-
       const unitPrice = Number(product.price);
-
-      const subtotal = Number(
-        (
-          unitPrice * item.quantity
-        ).toFixed(2)
-      );
-
+      const subtotal = Number((unitPrice * item.quantity).toFixed(2));
       orderItems.push({
         productId: product.productId,
         quantity: item.quantity,
@@ -187,22 +115,14 @@ async function createOrder(req, res) {
     }
 
     // =====================================================
-    // 5. CALCULATE TOTAL
+    // 6. CALCULATE TOTAL
     // =====================================================
-
-    const totalAmount = Number(
-      orderItems
-        .reduce(
-          (total, item) =>
-            total + item.subtotal,
-          0
-        )
-        .toFixed(2)
-    );
+    const totalAmount = Number(orderItems.reduce((total, item) => total + item.subtotal, 0).toFixed(2));
 
     // =====================================================
-    // 6. CREATE ORDER
+    // 7. CREATE ORDER (with warehouseId)
     // =====================================================
+    const finalWarehouseId = warehouseId || "WH01"; // default if not provided
 
     const order = {
       orderId: `ORD${Date.now()}`,
@@ -212,125 +132,52 @@ async function createOrder(req, res) {
       currency,
       shippingAddress,
       items: orderItems,
+     
       createdAt: new Date().toISOString()
     };
 
-    const createdOrder =
-      await orderRepository.create(order);
+    const createdOrder = await orderRepository.create(order);
 
     // =====================================================
-    // 7. PUBLISH ORDER CREATED EVENT
+    // 8. PUBLISH ORDER CREATED EVENT (with warehouseId)
     // =====================================================
-
-    publishEvent(
-      "OrderCreated",
-      {
-        orderId:
-          createdOrder.orderId,
-
-        customerId:
-          createdOrder.customerId,
-
-        totalAmount:
-          createdOrder.totalAmount,
-
-        currency:
-          createdOrder.currency,
-
-        items:
-          createdOrder.items
-      }
-    );
-
-    // =====================================================
-    // 8. RETURN CREATED ORDER
-    // =====================================================
-
-    return res.status(201).json({
-      data: createdOrder
+    await publishEvent("OrderCreated", {
+      orderId: createdOrder.orderId,
+      customerId: createdOrder.customerId,
+      totalAmount: createdOrder.totalAmount,
+      currency: createdOrder.currency,
+      items: createdOrder.items,
+      warehouseId: createdOrder.warehouseId   // 👈 pass the warehouseId
     });
 
+    // =====================================================
+    // 9. RETURN CREATED ORDER
+    // =====================================================
+    return res.status(201).json({ data: createdOrder });
   } catch (error) {
-    console.error(
-      "Create order error:",
-      error
-    );
-
-    return res.status(500).json({
-      error: "Failed to create order"
-    });
+    console.error("Create order error:", error);
+    return res.status(500).json({ error: "Failed to create order" });
   }
 }
 
-async function updateOrderStatus(
-  req,
-  res,
-  next
-) {
+async function updateOrderStatus(req, res, next) {
   const { status } = req.body;
-
-  // =====================================================
-  // 1. VALIDATE STATUS
-  // =====================================================
-
   if (!status) {
-    return res.status(400).json({
-      error: "status is required"
-    });
+    return res.status(400).json({ error: "status is required" });
   }
-
-  if (
-    !VALID_STATUSES.includes(status)
-  ) {
-    return res.status(400).json({
-      error:
-        `Invalid status. Allowed values: ${VALID_STATUSES.join(", ")}`
-    });
+  if (!VALID_STATUSES.includes(status)) {
+    return res.status(400).json({ error: `Invalid status. Allowed values: ${VALID_STATUSES.join(", ")}` });
   }
-
   try {
-    // =====================================================
-    // 2. CHECK ORDER EXISTS
-    // =====================================================
-
-    const order =
-      await orderRepository.findById(
-        req.params.orderId
-      );
-
+    const order = await orderRepository.findById(req.params.orderId);
     if (!order) {
-      return res.status(404).json({
-        error: "Order not found"
-      });
+      return res.status(404).json({ error: "Order not found" });
     }
-
-    // =====================================================
-    // 3. CUSTOMERS CANNOT CHANGE ORDER STATUS
-    // =====================================================
-
-    if (
-      req.user.role === "CUSTOMER"
-    ) {
-      return res.status(403).json({
-        error:
-          "Customers cannot update order status"
-      });
+    if (req.user.role === "CUSTOMER") {
+      return res.status(403).json({ error: "Customers cannot update order status" });
     }
-
-    // =====================================================
-    // 4. UPDATE STATUS
-    // =====================================================
-
-    const updatedOrder =
-      await orderRepository.updateStatus(
-        req.params.orderId,
-        status
-      );
-
-    return res.status(200).json({
-      data: updatedOrder
-    });
-
+    const updatedOrder = await orderRepository.updateStatus(req.params.orderId, status);
+    return res.status(200).json({ data: updatedOrder });
   } catch (error) {
     next(error);
   }

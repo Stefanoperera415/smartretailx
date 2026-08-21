@@ -1,9 +1,11 @@
+require("dotenv").config();
+
 const express = require("express");
 const swaggerUi = require("swagger-ui-express");
 const YAML = require("yamljs");
 const { connectDatabase } = require("./config/database");
 const cors = require("cors");
-require("dotenv").config();
+
 const path = require("path");
 
 const swaggerDocument = YAML.load(path.join(__dirname, "docs/openapi.yml"));
