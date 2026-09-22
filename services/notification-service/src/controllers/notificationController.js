@@ -177,6 +177,22 @@ async function streamNotifications(req, res) {
   });
 }
 
+
+async function getUnreadCount(req, res) {
+  try {
+    const { customerId } = req.query;
+    if (!customerId) {
+      return res.status(400).json({ error: "customerId is required" });
+    }
+    const notifications = await notificationRepo.findAll({ customerId });
+    const unread = notifications.filter((n) => n.status !== "READ").length;
+    return res.status(200).json({ data: { unread, total: notifications.length } });
+  } catch (error) {
+    console.error("Get unread count error:", error);
+    return res.status(500).json({ error: "Failed to get unread count" });
+  }
+}
+
 module.exports = {
   getNotifications,
   getNotificationById,
@@ -184,4 +200,5 @@ module.exports = {
   markAsRead,
   sendNotification,
   streamNotifications,
+  getUnreadCount,
 };

@@ -15,22 +15,18 @@ const Navbar = () => {
   const { user, logout } = useContext(AuthContext);
   const { cartCount } = useContext(CartContext);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [live, setLive] = useState(false);
 
-  // One-shot initial count + a manual refresh callback
   const refreshCount = useCallback(async () => {
     if (!user) {
       setUnreadCount(0);
       return;
     }
     try {
-      const res = await notificationService.getNotifications({
-        customerId: user.id,
-      });
-      const list = res.data.data || [];
-      // Count anything not yet READ
-      setUnreadCount(list.filter((n) => n.status !== "READ").length);
+      const res = await notificationService.getUnreadCount(user.id);
+      setUnreadCount(res?.data?.data?.unread ?? 0);
     } catch {
-      setUnreadCount(0);
+      // keep the last known value; polling will retry
     }
   }, [user]);
 
@@ -41,10 +37,14 @@ const Navbar = () => {
     return () => window.removeEventListener("notifications:updated", handler);
   }, [refreshCount]);
 
-  // Live stream: any new notification bumps the badge instantly
+  // Live stream + polling fallback — the hook calls onUnreadCount on every
+  // poll and after every created event, so the badge stays correct even
+  // if SSE is blocked.
   useNotificationStream(user?.id, {
     onCreated: () => setUnreadCount((c) => c + 1),
     onUpdated: () => refreshCount(),
+    onUnreadCount: (n) => setUnreadCount(n),
+    onConnectionChange: (ok) => setLive(ok),
   });
 
   return (
@@ -72,9 +72,12 @@ const Navbar = () => {
               <Link
                 to="/notifications"
                 className="relative text-sm font-medium text-gray-600 hover:text-indigo-600 transition-colors"
-                title="Notifications"
+                title={live ? "Live notifications connected" : "Notifications"}
               >
                 <BellIcon className="h-5 w-5 inline-block" />
+                {live && (
+                  <span className="absolute -top-1 -left-1 h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                )}
                 {unreadCount > 0 && (
                   <span className="absolute -top-1 -right-2 bg-red-500 text-white text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center">
                     {unreadCount > 9 ? "9+" : unreadCount}

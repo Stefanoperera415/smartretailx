@@ -1,23 +1,21 @@
 const { dynamoDB, INVENTORY_TABLE } = require("../config/database");
 const {
   GetCommand,
-  PutCommand,
   UpdateCommand,
   QueryCommand,
   ScanCommand,
   DeleteCommand,
 } = require("@aws-sdk/lib-dynamodb");
 
-/**
- * Normalise an inventory item so every consumer sees the same shape.
- * Guarantees numeric fields and a computed `available`.
- */
 function normalise(item) {
   if (!item) return null;
   const quantity = Number(item.quantity) || 0;
   const reservedQuantity = Number(item.reservedQuantity) || 0;
+
+  // Prefer stored `available`, but fall back to derived value so legacy
+  // items (created before `available` was introduced) still report correctly.
   const available =
-    item.available !== undefined
+    item.available !== undefined && item.available !== null
       ? Number(item.available)
       : quantity - reservedQuantity;
 
@@ -26,7 +24,7 @@ function normalise(item) {
     quantity,
     reservedQuantity,
     available,
-    stockOnHand: quantity, // alias, easier to reason about in admin UI
+    stockOnHand: quantity,
   };
 }
 
@@ -52,9 +50,8 @@ async function findOne(productId, warehouseId) {
 }
 
 /**
- * Upsert inventory item.
- * Sets quantity and reorderLevel, preserves existing reservedQuantity,
- * and recomputes available = quantity - reservedQuantity.
+ * Upsert inventory. Sets quantity + reorderLevel, preserves reservedQuantity,
+ * recomputes available = quantity - reservedQuantity.
  */
 async function upsert(productId, warehouseId, quantity, reorderLevel = 10) {
   const result = await dynamoDB.send(
@@ -85,10 +82,14 @@ async function upsert(productId, warehouseId, quantity, reorderLevel = 10) {
 }
 
 /**
- * Atomic reserve: decrement available, increment reservedQuantity.
- * NOTE: `quantity` (physical stock) is intentionally NOT changed here.
- *       Physical stock leaves the shelf only on ship, not on reserve.
- * Condition: available >= requested quantity.
+ * Atomic reserve.
+ *  - reservedQuantity += qty
+ *  - available        -= qty
+ *  - quantity stays untouched (physical stock leaves only on ship)
+ *
+ * ✅ FIX: uses `if_not_exists(#available, #quantity)` so legacy items that
+ *         never got an `available` attribute still reserve correctly.
+ *         If `available` is missing, we assume it equals `quantity`.
  */
 async function reserveStock(productId, warehouseId, quantity) {
   const result = await dynamoDB.send(
@@ -96,18 +97,19 @@ async function reserveStock(productId, warehouseId, quantity) {
       TableName: INVENTORY_TABLE,
       Key: { productId, warehouseId },
       UpdateExpression: `
-        ADD #reserved :inc,
-            #available :dec
+        SET #reserved = if_not_exists(#reserved, :zero) + :qty,
+            #available = if_not_exists(#available, #quantity) - :qty
       `,
-      ConditionExpression: "#available >= :qty",
+      ConditionExpression:
+        "attribute_exists(productId) AND if_not_exists(#available, #quantity) >= :qty",
       ExpressionAttributeNames: {
         "#reserved": "reservedQuantity",
         "#available": "available",
+        "#quantity": "quantity",
       },
       ExpressionAttributeValues: {
-        ":inc": quantity,
-        ":dec": -quantity,
         ":qty": quantity,
+        ":zero": 0,
       },
       ReturnValues: "ALL_NEW",
     })
@@ -116,8 +118,7 @@ async function reserveStock(productId, warehouseId, quantity) {
 }
 
 /**
- * Atomic release: increment available, decrement reservedQuantity.
- * Condition: reservedQuantity >= requested quantity.
+ * Atomic release. Mirror of reserve. Idempotent on the caller side.
  */
 async function releaseStock(productId, warehouseId, quantity) {
   const result = await dynamoDB.send(
@@ -125,18 +126,18 @@ async function releaseStock(productId, warehouseId, quantity) {
       TableName: INVENTORY_TABLE,
       Key: { productId, warehouseId },
       UpdateExpression: `
-        ADD #reserved :dec,
-            #available :inc
+        SET #reserved = if_not_exists(#reserved, :zero) - :qty,
+            #available = if_not_exists(#available, #quantity) + :qty
       `,
-      ConditionExpression: "#reserved >= :qty",
+      ConditionExpression: "if_not_exists(#reserved, :zero) >= :qty",
       ExpressionAttributeNames: {
         "#reserved": "reservedQuantity",
         "#available": "available",
+        "#quantity": "quantity",
       },
       ExpressionAttributeValues: {
-        ":dec": -quantity,
-        ":inc": quantity,
         ":qty": quantity,
+        ":zero": 0,
       },
       ReturnValues: "ALL_NEW",
     })
@@ -146,9 +147,7 @@ async function releaseStock(productId, warehouseId, quantity) {
 
 async function findAll() {
   const result = await dynamoDB.send(
-    new ScanCommand({
-      TableName: INVENTORY_TABLE,
-    })
+    new ScanCommand({ TableName: INVENTORY_TABLE })
   );
   return (result.Items || []).map(normalise);
 }

@@ -15,3 +15,15 @@ export const markNotificationRead = (notificationId) =>
 
 export const sendNotification = (notificationId) =>
   api.post(`${API_URLS.notification}/api/v1/notifications/${notificationId}/send`);
+
+// ✅ NEW: tiny payload for the bell badge
+export const getUnreadCount = (customerId) =>
+  api.get(`${API_URLS.notification}/api/v1/notifications/unread-count`, {
+    params: { customerId },
+  });
+
+// ✅ NEW: raw SSE URL builder (used by useNotificationStream)
+export const buildNotificationStreamUrl = (customerId) =>
+  `${API_URLS.notification}/api/v1/notifications/stream?customerId=${encodeURIComponent(
+    customerId
+  )}`;

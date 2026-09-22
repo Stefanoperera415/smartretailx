@@ -21,7 +21,7 @@ const typeStyles = {
   ORDER_CREATED: "bg-indigo-100 text-indigo-700",
   PAYMENT_COMPLETED: "bg-emerald-100 text-emerald-700",
   PAYMENT_FAILED: "bg-red-100 text-red-700",
-  ORDER_CANCELLED: "bg-amber-100 text-amber-700",   // ✅ NEW
+  ORDER_CANCELLED: "bg-amber-100 text-amber-700",
 };
 
 const typeLabel = (type) =>
@@ -35,7 +35,7 @@ const NotificationsPage = () => {
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [filter, setFilter] = useState("ALL"); // ALL | UNREAD
+  const [filter, setFilter] = useState("ALL");
 
   const fetchNotifications = useCallback(async () => {
     if (!user) return;
@@ -61,18 +61,29 @@ const NotificationsPage = () => {
     fetchNotifications();
   }, [fetchNotifications]);
 
-  // Live stream: prepend new notifications, patch updated ones in place
+  // Refetch whenever the tab regains focus (cheap safety net)
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === "visible") fetchNotifications();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [fetchNotifications]);
+
+  // Live stream — prepend new, patch updates in place, and keep the bell in sync
   useNotificationStream(user?.id, {
     onCreated: (n) => {
       setNotifications((prev) => {
         if (prev.some((x) => x.notificationId === n.notificationId)) return prev;
         return [n, ...prev];
       });
+      window.dispatchEvent(new Event("notifications:updated"));
     },
     onUpdated: (n) => {
       setNotifications((prev) =>
         prev.map((x) => (x.notificationId === n.notificationId ? n : x))
       );
+      window.dispatchEvent(new Event("notifications:updated"));
     },
   });
 

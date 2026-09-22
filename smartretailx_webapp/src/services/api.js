@@ -18,4 +18,30 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
+// ✅ NEW: on 401, try one silent renew then retry the original request.
+api.interceptors.response.use(
+  (res) => res,
+  async (error) => {
+    const original = error.config;
+    if (
+      error.response?.status === 401 &&
+      original &&
+      !original._retried
+    ) {
+      original._retried = true;
+      try {
+        const renewed = await userManager.signinSilent();
+        if (renewed?.id_token) {
+          original.headers.Authorization = `Bearer ${renewed.id_token}`;
+          return api(original);
+        }
+      } catch (e) {
+        // silent renew failed — let the app handle it
+        console.log("Silent renew failed:", e);
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 export default api;

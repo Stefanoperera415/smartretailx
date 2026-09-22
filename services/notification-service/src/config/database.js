@@ -12,7 +12,7 @@ const PROCESSED_EVENTS_TABLE = process.env.DYNAMODB_PROCESSED_EVENTS_TABLE;
 
 if (!NOTIFICATIONS_TABLE || !PROCESSED_EVENTS_TABLE) {
   throw new Error(
-    "DYNAMODB_NOTIFICATIONS_TABLE and DYNAMODB_PROCESSED_EVENTS_TABLE must be defined"
+    "DYNAMODB_NOTIFICATIONS_TABLE and DYNAMODB_PROCESSED_EVENTS_TABLE must be defined",
   );
 }
 
@@ -29,12 +29,12 @@ async function waitForTableActive(tableName, maxAttempts = 60) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     await new Promise((r) => setTimeout(r, 2000));
     const desc = await client.send(
-      new DescribeTableCommand({ TableName: tableName })
+      new DescribeTableCommand({ TableName: tableName }),
     );
     if (desc.Table.TableStatus === "ACTIVE") return;
   }
   throw new Error(
-    `Table ${tableName} did not become ACTIVE after ${maxAttempts} attempts`
+    `Table ${tableName} did not become ACTIVE after ${maxAttempts} attempts`,
   );
 }
 
@@ -42,7 +42,7 @@ async function waitForAllGsiActive(tableName, maxAttempts = 120) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     await new Promise((r) => setTimeout(r, 5000));
     const desc = await client.send(
-      new DescribeTableCommand({ TableName: tableName })
+      new DescribeTableCommand({ TableName: tableName }),
     );
     const gsis = desc.Table.GlobalSecondaryIndexes || [];
     if (gsis.length === 0) return;
@@ -50,7 +50,7 @@ async function waitForAllGsiActive(tableName, maxAttempts = 120) {
     if (allActive) return;
   }
   console.warn(
-    `Some GSIs on ${tableName} did not become ACTIVE within the wait window — continuing anyway.`
+    `Some GSIs on ${tableName} did not become ACTIVE within the wait window — continuing anyway.`,
   );
 }
 
@@ -63,7 +63,7 @@ async function waitForAllGsiActive(tableName, maxAttempts = 120) {
 async function waitForNoGsiInProgress(tableName, maxAttempts = 180) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const desc = await client.send(
-      new DescribeTableCommand({ TableName: tableName })
+      new DescribeTableCommand({ TableName: tableName }),
     );
 
     if (desc.Table.TableStatus !== "ACTIVE") {
@@ -73,7 +73,7 @@ async function waitForNoGsiInProgress(tableName, maxAttempts = 180) {
 
     const gsis = desc.Table.GlobalSecondaryIndexes || [];
     const busy = gsis.some(
-      (g) => g.IndexStatus === "CREATING" || g.IndexStatus === "UPDATING"
+      (g) => g.IndexStatus === "CREATING" || g.IndexStatus === "UPDATING",
     );
 
     if (!busy) return;
@@ -84,7 +84,7 @@ async function waitForNoGsiInProgress(tableName, maxAttempts = 180) {
         .map((g) => `${g.IndexName} (${g.IndexStatus})`)
         .join(", ");
       console.log(
-        `Waiting for in-flight GSI(s) on ${tableName} to finish: ${pending}`
+        `Waiting for in-flight GSI(s) on ${tableName} to finish: ${pending}`,
       );
     }
 
@@ -92,7 +92,7 @@ async function waitForNoGsiInProgress(tableName, maxAttempts = 180) {
   }
 
   console.warn(
-    `GSI(s) on ${tableName} did not settle within the wait window — continuing.`
+    `GSI(s) on ${tableName} did not settle within the wait window — continuing.`,
   );
 }
 
@@ -106,7 +106,7 @@ async function waitForNoGsiInProgress(tableName, maxAttempts = 180) {
  */
 async function getBillingMode(tableName) {
   const desc = await client.send(
-    new DescribeTableCommand({ TableName: tableName })
+    new DescribeTableCommand({ TableName: tableName }),
   );
   return desc.Table.BillingModeSummary?.BillingMode || "PROVISIONED";
 }
@@ -119,7 +119,7 @@ async function ensureTable(
   tableName,
   keySchema,
   attributeDefinitions,
-  globalSecondaryIndexes
+  globalSecondaryIndexes,
 ) {
   try {
     await client.send(new DescribeTableCommand({ TableName: tableName }));
@@ -184,7 +184,7 @@ async function addOneGsi(tableName, gsi, billingMode) {
         TableName: tableName,
         AttributeDefinitions: gsi.AttributeDefinitions,
         GlobalSecondaryIndexUpdates: [{ Create: create }],
-      })
+      }),
     );
   };
 
@@ -192,7 +192,7 @@ async function addOneGsi(tableName, gsi, billingMode) {
   console.log(
     `Adding GSI ${gsi.IndexName} to ${tableName} ` +
       `(table billing mode: ${billingMode}, ` +
-      `provisioned throughput: ${wantsThroughput ? "included" : "omitted"})...`
+      `provisioned throughput: ${wantsThroughput ? "included" : "omitted"})...`,
   );
 
   try {
@@ -200,14 +200,14 @@ async function addOneGsi(tableName, gsi, billingMode) {
   } catch (err) {
     const needsThroughput =
       /ReadCapacityUnits|WriteCapacityUnits|ProvisionedThroughput/i.test(
-        err.message
+        err.message,
       );
 
     // AWS quirk: on-demand table but API still wants capacity. Retry with PT.
     if (!wantsThroughput && needsThroughput) {
       console.warn(
         `DynamoDB asked for ProvisionedThroughput on an on-demand table. ` +
-          `Retrying ${gsi.IndexName} with a fallback value...`
+          `Retrying ${gsi.IndexName} with a fallback value...`,
       );
       await tryWith(true);
     } else {
@@ -227,10 +227,10 @@ async function repairGlobalSecondaryIndexes(tableName, desiredGsis) {
 
   // Step 2 — figure out which desired GSIs are missing.
   const desc = await client.send(
-    new DescribeTableCommand({ TableName: tableName })
+    new DescribeTableCommand({ TableName: tableName }),
   );
   const existingNames = new Set(
-    (desc.Table.GlobalSecondaryIndexes || []).map((g) => g.IndexName)
+    (desc.Table.GlobalSecondaryIndexes || []).map((g) => g.IndexName),
   );
 
   const missing = desiredGsis.filter((g) => !existingNames.has(g.IndexName));
@@ -246,7 +246,7 @@ async function repairGlobalSecondaryIndexes(tableName, desiredGsis) {
   console.log(
     `Table ${tableName} is missing GSIs: ${missing
       .map((g) => g.IndexName)
-      .join(", ")} — adding them now (this can take a few minutes).`
+      .join(", ")} — adding them now (this can take a few minutes).`,
   );
 
   // Step 3 — add each missing GSI one at a time, retrying on the
@@ -255,10 +255,10 @@ async function repairGlobalSecondaryIndexes(tableName, desiredGsis) {
     // Re-check the table each iteration: a previous add (or another
     // running instance) may have shifted state.
     const current = await client.send(
-      new DescribeTableCommand({ TableName: tableName })
+      new DescribeTableCommand({ TableName: tableName }),
     );
     const alreadyThere = (current.Table.GlobalSecondaryIndexes || []).some(
-      (g) => g.IndexName === gsi.IndexName
+      (g) => g.IndexName === gsi.IndexName,
     );
     if (alreadyThere) {
       console.log(`GSI ${gsi.IndexName} already present on ${tableName}.`);
@@ -282,13 +282,13 @@ async function repairGlobalSecondaryIndexes(tableName, desiredGsis) {
         if (isConcurrentLimit && attempt < maxAttempts) {
           console.warn(
             `GSI ${gsi.IndexName} blocked by another in-flight index ` +
-              `(attempt ${attempt}/${maxAttempts}). Waiting for it to finish...`
+              `(attempt ${attempt}/${maxAttempts}). Waiting for it to finish...`,
           );
           await waitForNoGsiInProgress(tableName);
           // loop retries
         } else {
           console.warn(
-            `Could not add GSI ${gsi.IndexName} to ${tableName}: ${err.message}`
+            `Could not add GSI ${gsi.IndexName} to ${tableName}: ${err.message}`,
           );
           // Don't throw — the next startup will retry.
           break;
@@ -318,31 +318,29 @@ async function connectDatabase() {
     const notificationsGsis = [
       {
         IndexName: "customerId-index",
-        KeySchema: [{ AttributeName: "customerId", KeyType: "HASH" }],
+        KeySchema: [
+          { AttributeName: "customerId", KeyType: "HASH" },
+          { AttributeName: "createdAt", KeyType: "RANGE" }, // ✅ add sort key
+        ],
         Projection: { ProjectionType: "ALL" },
         AttributeDefinitions: [
           { AttributeName: "customerId", AttributeType: "S" },
+          { AttributeName: "createdAt", AttributeType: "S" },
         ],
-      },
-      {
-        IndexName: "status-index",
-        KeySchema: [{ AttributeName: "status", KeyType: "HASH" }],
-        Projection: { ProjectionType: "ALL" },
-        AttributeDefinitions: [{ AttributeName: "status", AttributeType: "S" }],
       },
     ];
 
     // For CreateTable we strip the per-GSI AttributeDefinitions — the top-level
     // AttributeDefinitions already declares every attribute the table uses.
     const gsisForCreate = notificationsGsis.map(
-      ({ AttributeDefinitions, ...gsi }) => gsi
+      ({ AttributeDefinitions, ...gsi }) => gsi,
     );
 
     await ensureTable(
       NOTIFICATIONS_TABLE,
       notificationsKeySchema,
       notificationsAttrs,
-      gsisForCreate
+      gsisForCreate,
     );
 
     await repairGlobalSecondaryIndexes(NOTIFICATIONS_TABLE, notificationsGsis);
@@ -351,7 +349,7 @@ async function connectDatabase() {
     await ensureTable(
       PROCESSED_EVENTS_TABLE,
       [{ AttributeName: "eventId", KeyType: "HASH" }],
-      [{ AttributeName: "eventId", AttributeType: "S" }]
+      [{ AttributeName: "eventId", AttributeType: "S" }],
     );
 
     console.log("Connected to DynamoDB");

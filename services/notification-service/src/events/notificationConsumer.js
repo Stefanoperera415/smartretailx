@@ -14,9 +14,6 @@ const notificationBus = require("./notificationBus");
 const { sendEmail } = require("../service/emailService");
 const { getUserEmail } = require("../clients/userServiceClient");
 
-// ==========================================
-// Helpers
-// =====================c=====================
 function buildProductSummary(items = []) {
   const names = items
     .map((i) => i.productName || i.name)
@@ -31,30 +28,35 @@ function generateNotificationId() {
 }
 
 /**
- * Save the notification, publish it on the bus, then try to email it.
- * Marked SENT on successful delivery; left PENDING on failure so an admin
- * can trigger a resend from /admin/notifications.
+ * ✅ Persist, emit on the bus IMMEDIATELY (so SSE clients get it), then attempt
+ *    email delivery. Email failures don't roll back the SSE push.
  */
 async function persistAndDeliver(notification) {
+  // 1. Persist first so a subsequent GET reflects it.
   await notificationRepo.create(notification);
 
-  // Live push to any open SSE clients
+  // 2. Push to live SSE clients (must be synchronous with the create so the
+  //    frontend bell updates the moment the event is processed).
   try {
     notificationBus.emit("created", notification);
+    console.log(
+      `[SSE] emitted 'created' notification ${notification.notificationId} ` +
+        `→ customerId=${notification.customerId}`
+    );
   } catch (err) {
     console.error("Bus emit failed:", err.message);
   }
 
-  // Look up the user's email
+  // 3. Email is best-effort; on failure the notification stays PENDING so an
+  //    admin can resend from /admin/notifications.
   const email = await getUserEmail(notification.customerId);
   if (!email) {
     console.warn(
-      `No email found for customer ${notification.customerId} – notification stays PENDING`
+      `No email for customer ${notification.customerId} — notification stays PENDING`
     );
     return notification;
   }
 
-  // Attempt delivery
   const subject = subjectForType(notification.type);
   const result = await sendEmail({
     to: email,
@@ -98,15 +100,12 @@ function subjectForType(type) {
     case "PAYMENT_FAILED":
       return "SmartRetailX – Payment failed";
     case "ORDER_CANCELLED":
-      return "SmartRetailX – Order cancelled";   // ✅ NEW
+      return "SmartRetailX – Order cancelled";
     default:
       return "SmartRetailX notification";
   }
 }
 
-// ==========================================
-// Start SQS Consumer
-// ==========================================
 async function startNotificationConsumer() {
   console.log("========================================");
   console.log("Starting Notification SQS consumer");
@@ -115,9 +114,6 @@ async function startNotificationConsumer() {
   pollMessages();
 }
 
-// ==========================================
-// Poll SQS (long polling)
-// ==========================================
 async function pollMessages() {
   while (true) {
     try {
@@ -125,7 +121,7 @@ async function pollMessages() {
         QueueUrl: NOTIFICATION_QUEUE_URL,
         MaxNumberOfMessages: 10,
         WaitTimeSeconds: 20,
-        VisibilityTimeout: 30,
+        VisibilityTimeout: 60,
         MessageAttributeNames: ["All"],
       });
       const response = await sqs.send(command);
@@ -141,9 +137,6 @@ async function pollMessages() {
   }
 }
 
-// ==========================================
-// Process Individual Message
-// ==========================================
 async function processMessage(message) {
   let claimedEventId = null;
 
@@ -166,16 +159,18 @@ async function processMessage(message) {
 
     console.log("Event type:", eventType, "id:", eventId);
 
-    // Reject unsupported event types up front — no claim needed.
-    const supported = ["OrderCreated", "PaymentCompleted", "PaymentFailed", "OrderCancelled"];
+    const supported = [
+      "OrderCreated",
+      "PaymentCompleted",
+      "PaymentFailed",
+      "OrderCancelled",
+    ];
     if (!supported.includes(eventType)) {
       console.log(`Ignoring unsupported event type: ${eventType}`);
       await deleteMessage(message);
       return;
     }
 
-    // ✅ CLAIM FIRST — atomic conditional write closes the race between
-    //    concurrent SQS deliveries of the same message.
     const claimed = await markProcessed(eventId, eventType);
     if (!claimed) {
       console.log(`Duplicate event ignored: ${eventId}`);
@@ -184,7 +179,6 @@ async function processMessage(message) {
     }
     claimedEventId = eventId;
 
-    // Dispatch — handlers no longer check hasProcessed (we own the claim).
     if (eventType === "OrderCreated") {
       await handleOrderCreated(data);
     } else if (eventType === "PaymentCompleted") {
@@ -201,19 +195,20 @@ async function processMessage(message) {
   } catch (error) {
     console.error("Notification consumer error:", error);
 
-    // ✅ Roll back the claim so SQS redelivery retries the handler.
     if (claimedEventId) {
       await unmarkProcessed(claimedEventId);
-      console.warn(`Claim rolled back for ${claimedEventId} — message will retry`);
+      console.warn(
+        `Claim rolled back for ${claimedEventId} — message will retry`
+      );
     }
 
     console.log("Message will remain in SQS and will be retried.");
   }
 }
 
-// ==========================================
+// ---------------------------------------------------------------------------
 // Handlers
-// ==========================================
+// ---------------------------------------------------------------------------
 
 async function handleOrderCreated(data) {
   const { orderId, customerId, totalAmount, currency, items = [] } = data;
@@ -256,9 +251,7 @@ async function handlePaymentCompleted(data) {
     status: "PENDING",
   });
 
-  console.log(
-    `Notification created for PaymentCompleted: ${orderId} → "${productSummary}"`
-  );
+  console.log(`Notification created for PaymentCompleted: ${orderId}`);
 }
 
 async function handlePaymentFailed(data) {
@@ -284,11 +277,6 @@ async function handlePaymentFailed(data) {
   console.log(`Notification created for PaymentFailed: ${orderId}`);
 }
 
-/**
- * Single cancellation handler for every failure path:
- * inventory unavailable, payment failure, admin cancel, saga timeout.
- * Order-service converges all of these into a single OrderCancelled event.
- */
 async function handleOrderCancelled(data) {
   const { orderId, customerId, reason, items = [] } = data;
   if (!orderId || !customerId) {
@@ -301,10 +289,9 @@ async function handleOrderCancelled(data) {
   await persistAndDeliver({
     notificationId: generateNotificationId(),
     customerId,
-    type: "ORDER_CANCELLED", // ✅ proper type instead of PAYMENT_FAILED
+    type: "ORDER_CANCELLED",
     channel: "EMAIL",
-    message:
-      `Your order ${orderId} for ${productSummary} has been cancelled.${reasonText}`,
+    message: `Your order ${orderId} for ${productSummary} has been cancelled.${reasonText}`,
     metadata: { orderId, reason, items },
     status: "PENDING",
   });
@@ -312,15 +299,13 @@ async function handleOrderCancelled(data) {
   console.log(`Cancellation notification created for ${orderId}`);
 }
 
-// ==========================================
-// Delete SQS Message
-// ==========================================
 async function deleteMessage(message) {
-  const command = new DeleteMessageCommand({
-    QueueUrl: NOTIFICATION_QUEUE_URL,
-    ReceiptHandle: message.ReceiptHandle,
-  });
-  await sqs.send(command);
+  await sqs.send(
+    new DeleteMessageCommand({
+      QueueUrl: NOTIFICATION_QUEUE_URL,
+      ReceiptHandle: message.ReceiptHandle,
+    })
+  );
 }
 
 function sleep(ms) {
