@@ -2,8 +2,19 @@ openapi: 3.0.3
 
 info:
   title: SmartRetailX Notification API
-  description: Notification management API for SmartRetailX.
-  version: 1.0.0
+  description: |
+    Notification management API for SmartRetailX.
+
+    Provides CRUD operations for customer notifications, plus a live
+    Server-Sent Events (SSE) stream so the frontend can update the
+    notification badge in real time.
+
+    All successful responses are wrapped as `{ "data": ... }` unless noted.
+    All error responses are wrapped as `{ "error": "..." }`.
+  version: 1.1.0
+  contact:
+    name: SmartRetailX
+    url: https://github.com/smartretailx
 
 servers:
   - url: http://localhost:3006
@@ -12,192 +23,141 @@ servers:
 tags:
   - name: Notifications
     description: Notification management operations
+  - name: Stream
+    description: Server-Sent Events (SSE) live notifications
 
 paths:
+  # ---------------------------------------------------------------------------
+  # Collection
+  # ---------------------------------------------------------------------------
 
   /api/v1/notifications:
-
     get:
-      tags:
-        - Notifications
+      tags: [Notifications]
+      summary: List notifications
+      description: |
+        Returns notifications ordered by `createdAt` descending.
 
-      summary: Get notifications
-
+        - Pass `customerId` to fetch a single customer's inbox.
+        - Pass `status` to filter by status.
+        - Pass neither to fetch everything (admin/debug use).
+      operationId: getNotifications
       parameters:
-
         - name: customerId
           in: query
           required: false
+          description: Cognito sub of the recipient
           schema:
             type: string
-          example: U001
+          example: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
 
         - name: status
           in: query
           required: false
           schema:
             type: string
-            enum:
-              - PENDING
-              - SENT
-              - FAILED
-              - READ
+            enum: [PENDING, SENT, READ]
+          example: PENDING
 
       responses:
-
         "200":
-          description: Notifications retrieved successfully
-
+          description: Notifications retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Notification"
+              example:
+                data:
+                  - notificationId: NOTIF1790003080488-xbixql
+                    eventId: evt-1790003080488-xbixql
+                    customerId: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
+                    type: PAYMENT_COMPLETED
+                    channel: EMAIL
+                    message: Payment of 627 GBP for order ORD1790003079887 was successful. Your "Buldak Ramen" will be delivered shortly.
+                    status: SENT
+                    metadata:
+                      orderId: ORD1790003079887
+                      amount: 627
+                      currency: GBP
+                    messageId: 01000192...
+                    sentAt: "2026-09-21T15:04:55.130Z"
+                    createdAt: "2026-09-21T15:04:55.130Z"
+                    updatedAt: "2026-09-21T15:04:56.000Z"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
     post:
-      tags:
-        - Notifications
-
-      summary: Create a notification
-
+      tags: [Notifications]
+      summary: Create a notification manually
+      description: |
+        Creates a PENDING notification. It is emitted on the live SSE bus
+        but **not** emailed — call `POST /{id}/send` to trigger delivery.
+      operationId: createNotification
       requestBody:
         required: true
-
         content:
           application/json:
-
             schema:
               $ref: "#/components/schemas/CreateNotificationRequest"
-
+            example:
+              customerId: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
+              type: PAYMENT_COMPLETED
+              channel: EMAIL
+              message: Your order has been confirmed.
       responses:
-
         "201":
-          description: Notification created successfully
-
+          description: Notification created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Notification"
         "400":
-          description: Invalid request
+          description: Missing required field
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: customerId, type, channel and message are required
+        "500":
+          $ref: "#/components/responses/InternalError"
 
+  # ---------------------------------------------------------------------------
+  # Live SSE stream — MUST be documented before /{notificationId} in Express
+  # ---------------------------------------------------------------------------
 
-  /api/v1/notifications/{notificationId}:
-
+  /api/v1/notifications/stream:
     get:
-      tags:
-        - Notifications
+      tags: [Stream]
+      summary: Live notification stream (Server-Sent Events)
+      description: |
+        Opens a long-lived SSE connection for a single customer.
 
-      summary: Get notification by ID
+        **Events emitted:**
+        - `notification` — a new notification was created for this customer
+        - `updated` — an existing notification's status changed (e.g. PENDING → SENT, or READ)
+        - Default heartbeat comment `: ping` every 25 seconds
 
-      parameters:
+        **Event payload:** JSON-serialised notification object on the `data:` line.
 
-        - name: notificationId
-          in: path
-          required: true
-
-          schema:
-            type: string
-
-          example: NOTIF1001
-
-      responses:
-
-        "200":
-          description: Notification retrieved successfully
-
-        "404":
-          description: Notification not found
-
-
-  /api/v1/notifications/{notificationId}/read:
-
-    patch:
-      tags:
-        - Notifications
-
-      summary: Mark notification as read
-
-      parameters:
-
-        - name: notificationId
-          in: path
-          required: true
-
-          schema:
-            type: string
-
-          example: NOTIF1001
-
-      responses:
-
-        "200":
-          description: Notification marked as read
-
-        "404":
-          description: Notification not found
-
-
-  /api/v1/notifications/{notificationId}/send:
-
-    post:
-      tags:
-        - Notifications
-
-      summary: Send notification
-
-      parameters:
-
-        - name: notificationId
-          in: path
-          required: true
-
-          schema:
-            type: string
-
-          example: NOTIF1001
-
-      responses:
-
-        "200":
-          description: Notification sent
-
-        "404":
-          description: Notification not found
-
-        "409":
-          description: Notification already sent
-
-
-components:
-
-  schemas:
-
-    CreateNotificationRequest:
-
-      type: object
-
-      required:
-        - customerId
-        - type
-        - channel
-        - message
-
-      properties:
-
-        customerId:
-          type: string
-          example: U001
-
-        type:
-          type: string
-          enum:
-            - ORDER_CREATED
-            - ORDER_CONFIRMED
-            - PAYMENT_COMPLETED
-            - PAYMENT_FAILED
-            - ORDER_SHIPPED
-            - ORDER_DELIVERED
-            - STOCK_ALERT
-
-        channel:
-          type: string
-          enum:
-            - EMAIL
-            - SMS
-            - PUSH
-
-        message:
-          type: string
-          example: Your order has been confirmed.
+        **Usage from browser:**
+        ```js
+        const es = new EventSource(
+          "http://localhost:3006/api/v1/notifications/stream?customerId=<sub>"
+        );
+        es.addEventListener("notification", (e) => {
+          const n = JSON.parse(e.data);
+          // append to UI / bump badge
+        });
+        es.addEventListener("updated", (e) => {
+          const n = JSON.parse(e.data);
+          // patch existing item by n.notificationId
+        });

@@ -7,6 +7,7 @@ const swaggerUi = require("swagger-ui-express");
 const YAML = require("yamljs");
 
 const productRoutes = require("./routes/products");
+const categoryRoutes = require("./routes/categories");
 const { connectDatabase } = require("./config/database");   // ✅ destructure
 const { connectEventBridge } = require("./config/eventbridge");
 
@@ -33,6 +34,7 @@ app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 // API routes
 app.use("/api/v1/products", productRoutes);
+app.use("/api/v1/categories", categoryRoutes);
 
 // 404
 app.use((req, res) => {

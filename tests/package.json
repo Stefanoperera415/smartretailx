@@ -1,0 +1,20 @@
+{
+  "name": "smartretailx-tests",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "token": "node scripts/get-cognito-token.js",
+    "test:api": "k6 run k6/api-response.js",
+    "test:load": "k6 run k6/load.js",
+    "test:stress": "k6 run k6/stress.js",
+    "test:concurrent": "k6 run k6/concurrent.js",
+    "test:newman": "newman run postman/smartretailx.postman_collection.json -e postman/local.postman_environment.json"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.1136.0",
+    "dotenv": "^17.4.2"
+  },
+  "devDependencies": {
+    "newman": "^6.2.1"
+  }
+}

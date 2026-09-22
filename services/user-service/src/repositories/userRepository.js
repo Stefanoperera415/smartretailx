@@ -1,5 +1,4 @@
-const database = require("../config/database");  // ← import the module, not the property
-const bcrypt = require("bcrypt");
+const database = require("../config/database");  // ← import the 
 
 // Helper to map DB row to camelCase
 function mapUser(row) {
@@ -62,15 +61,7 @@ async function findByEmail(email) {
   const pool = database.pool;
   const result = await pool.query(
     `
-    SELECT
-      user_id,
-      email,
-      first_name,
-      last_name,
-      phone,
-      role,
-      status,
-      password_hash
+    SELECT user_id, email, first_name, last_name, phone, role, status
     FROM users
     WHERE email = $1
     `,
@@ -86,37 +77,19 @@ async function findByEmail(email) {
     phone: row.phone,
     role: row.role,
     status: row.status,
-    passwordHash: row.password_hash,
   };
 }
 
 async function create(user) {
   const pool = database.pool;
-  const hashedPassword = await bcrypt.hash(user.password, 10);
   const result = await pool.query(
     `
     INSERT INTO users
-    (
-      user_id,
-      email,
-      first_name,
-      last_name,
-      phone,
-      role,
-      status,
-      password_hash
-    )
+      (user_id, email, first_name, last_name, phone, role, status, password_hash)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     RETURNING
-      user_id,
-      email,
-      first_name,
-      last_name,
-      phone,
-      role,
-      status,
-      created_at,
-      updated_at
+      user_id, email, first_name, last_name, phone, role, status,
+      created_at, updated_at
     `,
     [
       user.id,
@@ -126,7 +99,7 @@ async function create(user) {
       user.phone || null,
       user.role || "CUSTOMER",
       user.status || "ACTIVE",
-      hashedPassword,
+      "COGNITO_MANAGED", // Placeholder since Cognito handles passwords now
     ]
   );
   return mapUser(result.rows[0]);
@@ -145,21 +118,13 @@ async function update(id, updates) {
     phone: "phone",
     role: "role",
     status: "status",
-    password: "password_hash",
   };
 
   for (const [key, column] of Object.entries(mapping)) {
     if (updates[key] !== undefined) {
-      if (key === "password") {
-        const hashed = await bcrypt.hash(updates.password, 10);
-        fields.push(`${column} = $${paramIndex}`);
-        values.push(hashed);
-        paramIndex++;
-      } else {
-        fields.push(`${column} = $${paramIndex}`);
-        values.push(updates[key]);
-        paramIndex++;
-      }
+      fields.push(`${column} = $${paramIndex}`);
+      values.push(updates[key]);
+      paramIndex++;
     }
   }
 
@@ -174,16 +139,7 @@ async function update(id, updates) {
     UPDATE users
     SET ${fields.join(", ")}
     WHERE user_id = $${paramIndex}
-    RETURNING
-      user_id,
-      email,
-      first_name,
-      last_name,
-      phone,
-      role,
-      status,
-      created_at,
-      updated_at
+    RETURNING user_id, email, first_name, last_name, phone, role, status, created_at, updated_at
     `,
     values
   );

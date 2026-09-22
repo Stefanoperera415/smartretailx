@@ -1,7 +1,30 @@
 const productRepository = require("../repositories/productRepository");
+const categoryRepository = require("../repositories/categoryRepository");
 const s3Service = require("../services/s3Service");
 const { publishEvent } = require("../config/eventbridge");
 const path = require("path");
+
+/**
+ * Publish EventBridge event with retry (3 attempts, exponential backoff)
+ */
+async function publishEventWithRetry(eventType, data, maxAttempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await publishEvent(eventType, data);
+      console.log(`✅ Published ${eventType} event (attempt ${attempt})`);
+      return;
+    } catch (error) {
+      lastError = error;
+      console.warn(`⚠️ Event publish attempt ${attempt} failed: ${error.message}`);
+      if (attempt < maxAttempts) {
+        const delay = 1000 * Math.pow(2, attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+  console.error(`❌ Failed to publish ${eventType} after ${maxAttempts} attempts:`, lastError);
+}
 
 /**
  * Enrich products with signed S3 URLs if imageUrl is a key
@@ -64,10 +87,10 @@ async function createProduct(req, res, next) {
       categoryId,
       description,
       price,
-      currency = "GBP",
+      currency = "LKR",
       status = "ACTIVE",
-      initialStock,    // new optional field
-      warehouseId,     // new optional field
+      initialStock,
+      warehouseId,
     } = req.body;
 
     // Validate required fields
@@ -75,6 +98,12 @@ async function createProduct(req, res, next) {
       return res.status(400).json({
         error: "name, categoryId, description and price are required",
       });
+    }
+
+    // Validate category exists
+    const category = await categoryRepository.findById(categoryId);
+    if (!category) {
+      return res.status(400).json({ error: "Category does not exist" });
     }
 
     const priceNum = Number(price);
@@ -123,26 +152,25 @@ async function createProduct(req, res, next) {
 
     const created = await productRepository.create(newProduct);
 
-    // ----- Publish ProductCreated event -----
+    // ----- Publish ProductCreated event with retry -----
     const stock = initialStock !== undefined ? Number(initialStock) : 0;
-    const whId = warehouseId || "WH01";
-    try {
-      await publishEvent("ProductCreated", {
-        productId: created.productId,
-        name: created.name,
-        categoryId: created.categoryId,
-        description: created.description,
-        price: created.price,
-        currency: created.currency,
-        imageUrl: created.imageUrl,
-        status: created.status,
-        initialStock: stock,
-        warehouseId: whId,
-      });
-    } catch (error) {
-      console.error("Failed to publish ProductCreated event:", error);
-      // Do not fail the request; product already created
-    }
+    // ✅ Keep warehouseId as provided (null if not set) – let inventory decide
+    const whId = (warehouseId && warehouseId.trim() !== "") ? warehouseId.trim() : null;
+
+    publishEventWithRetry("ProductCreated", {
+      productId: created.productId,
+      name: created.name,
+      categoryId: created.categoryId,
+      description: created.description,
+      price: created.price,
+      currency: created.currency,
+      imageUrl: created.imageUrl,
+      status: created.status,
+      initialStock: stock,
+      warehouseId: whId, // forward as-is
+    }).catch((error) => {
+      // already logged inside function
+    });
 
     let responseProduct = created;
     if (imageKey) {
@@ -169,7 +197,6 @@ async function updateProduct(req, res, next) {
       return res.status(404).json({ error: "Product not found" });
     }
 
-    // ---- Extract text fields (works for both multipart and JSON) ----
     const {
       name,
       categoryId,
@@ -177,7 +204,7 @@ async function updateProduct(req, res, next) {
       price,
       currency,
       status,
-      removeImage, // if "true" (string) or boolean
+      removeImage,
     } = req.body;
 
     const updates = {};
@@ -193,6 +220,10 @@ async function updateProduct(req, res, next) {
     if (categoryId !== undefined) {
       if (typeof categoryId !== "string" || !categoryId.trim()) {
         return res.status(400).json({ error: "categoryId must be a non-empty string" });
+      }
+      const category = await categoryRepository.findById(categoryId);
+      if (!category) {
+        return res.status(400).json({ error: "Category does not exist" });
       }
       updates.categoryId = categoryId.trim();
     }
@@ -227,53 +258,42 @@ async function updateProduct(req, res, next) {
     }
 
     // ---- Handle image ----
-    // determine if we need to remove the existing image
     const shouldRemoveImage =
       removeImage === "true" || removeImage === true || removeImage === "1";
 
-    // If a new file is uploaded, we'll replace the old image.
-    // If removeImage is true and no file, we'll delete the old image.
     if (req.file) {
-      // New image uploaded
       const timestamp = Date.now();
       const ext = path.extname(req.file.originalname);
       const imageKey = `products/${productId}/${timestamp}${ext}`;
 
-      // Upload new image to S3
       await s3Service.uploadFile(req.file.buffer, imageKey, req.file.mimetype);
 
-      // If there was an old image, delete it
       if (existing.imageUrl && existing.imageUrl.startsWith("products/")) {
         try {
           await s3Service.deleteFile(existing.imageUrl);
           console.log(`Deleted old image ${existing.imageUrl} from S3`);
         } catch (error) {
-          console.error(`Failed to delete old image: ${error.message}`);
-          // continue anyway
+          console.warn(`⚠️ Failed to delete old image ${existing.imageUrl}: ${error.message}`);
         }
       }
 
       updates.imageUrl = imageKey;
     } else if (shouldRemoveImage) {
-      // remove image – delete from S3 and set imageUrl to null
       if (existing.imageUrl && existing.imageUrl.startsWith("products/")) {
         try {
           await s3Service.deleteFile(existing.imageUrl);
           console.log(`Deleted image ${existing.imageUrl} from S3`);
         } catch (error) {
-          console.error(`Failed to delete image: ${error.message}`);
-          // continue anyway
+          console.warn(`⚠️ Failed to delete image ${existing.imageUrl}: ${error.message}`);
         }
       }
       updates.imageUrl = null;
     }
 
-    // If no updates at all (text + image), return 400
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ error: "No valid fields provided for update" });
     }
 
-    // ---- Check duplicate name (if name changed) ----
     if (updates.name && updates.name.toLowerCase() !== existing.name.toLowerCase()) {
       const duplicate = await productRepository.findByName(updates.name);
       if (duplicate) {
@@ -281,10 +301,8 @@ async function updateProduct(req, res, next) {
       }
     }
 
-    // ---- Perform update ----
     const updated = await productRepository.update(productId, updates);
 
-    // ---- Enrich response with signed URL if image exists ----
     let responseProduct = updated;
     if (updated.imageUrl && updated.imageUrl.startsWith("products/")) {
       try {
@@ -310,13 +328,12 @@ async function deleteProduct(req, res, next) {
       return res.status(404).json({ error: "Product not found" });
     }
 
-    // Delete image from S3 if it exists
     if (product.imageUrl && product.imageUrl.startsWith("products/")) {
       try {
         await s3Service.deleteFile(product.imageUrl);
         console.log(`Deleted image ${product.imageUrl} from S3`);
       } catch (error) {
-        console.error(`Failed to delete image from S3: ${error.message}`);
+        console.warn(`⚠️ Failed to delete image ${product.imageUrl}: ${error.message}`);
       }
     }
 
@@ -337,3 +354,4 @@ module.exports = {
   updateProduct,
   deleteProduct,
 };
+

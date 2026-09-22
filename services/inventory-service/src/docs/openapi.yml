@@ -2,8 +2,15 @@ openapi: 3.0.3
 
 info:
   title: SmartRetailX Inventory Management API
-  description: API for inventory, stock reservation and stock release.
-  version: 1.0.0
+  description: |
+    API for inventory, stock reservation, stock release, and warehouse management.
+
+    All successful responses are wrapped as `{ "data": ... }`.
+    All error responses are wrapped as `{ "error": "..." }`.
+  version: 1.1.0
+  contact:
+    name: SmartRetailX
+    url: https://github.com/smartretailx
 
 servers:
   - url: http://localhost:3004
@@ -12,213 +19,569 @@ servers:
 tags:
   - name: Inventory
     description: Inventory management operations
+  - name: Warehouses
+    description: Warehouse CRUD operations
 
 paths:
+  # ---------------------------------------------------------------------------
+  # Inventory
+  # ---------------------------------------------------------------------------
 
-  /api/v1/inventory/{productId}:
-
+  /api/v1/inventory:
     get:
-      tags:
-        - Inventory
-      summary: Get inventory for a product
-
-      parameters:
-        - name: productId
-          in: path
-          required: true
-          schema:
-            type: string
-          example: P001
-
+      tags: [Inventory]
+      summary: List all inventory records across all warehouses
+      operationId: getAllInventory
       responses:
         "200":
-          description: Inventory retrieved successfully
+          description: Inventory list retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Inventory"
+              example:
+                data:
+                  - productId: P1788767406608
+                    warehouseId: WH01
+                    quantity: 100
+                    reservedQuantity: 20
+                    available: 80
+                    reorderLevel: 10
+                    createdAt: "2026-09-21T10:00:00.000Z"
+                    updatedAt: "2026-09-21T10:00:00.000Z"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
+  /api/v1/inventory/{productId}:
+    get:
+      tags: [Inventory]
+      summary: Get inventory for a product across all warehouses
+      operationId: getInventoryByProduct
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+      responses:
+        "200":
+          description: Inventory retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Inventory"
         "404":
-          description: Inventory not found
-
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
     patch:
-      tags:
-        - Inventory
-      summary: Update inventory
-
+      tags: [Inventory]
+      summary: Upsert inventory for a product in a specific warehouse
+      operationId: updateInventory
       parameters:
-        - name: productId
-          in: path
-          required: true
-          schema:
-            type: string
-          example: P001
-
+        - $ref: "#/components/parameters/ProductId"
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/UpdateInventoryRequest"
-
+            example:
+              warehouseId: WH01
+              quantity: 100
+              reorderLevel: 10
       responses:
         "200":
-          description: Inventory updated successfully
-
+          description: Inventory updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Inventory"
         "400":
-          description: Invalid request
-
+          description: Invalid request (missing warehouseId, invalid quantity, or warehouse not found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "409":
-          description: Invalid inventory state
+          description: Quantity cannot be lower than reserved quantity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
+  /api/v1/inventory/{productId}/{warehouseId}:
+    get:
+      tags: [Inventory]
+      summary: Get inventory for a product in a specific warehouse
+      operationId: getInventoryByWarehouse
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+        - $ref: "#/components/parameters/WarehouseId"
+      responses:
+        "200":
+          description: Inventory retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Inventory"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      tags: [Inventory]
+      summary: Delete an inventory record
+      operationId: deleteInventory
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+        - $ref: "#/components/parameters/WarehouseId"
+      responses:
+        "204":
+          description: Inventory deleted (no body)
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/inventory/{productId}/reserve:
-
     post:
-      tags:
-        - Inventory
-      summary: Reserve inventory
-
+      tags: [Inventory]
+      summary: Reserve stock (decrement available, increment reserved)
+      operationId: reserveInventory
       parameters:
-        - name: productId
-          in: path
-          required: true
-          schema:
-            type: string
-          example: P001
-
+        - $ref: "#/components/parameters/ProductId"
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/InventoryOperationRequest"
-
+            example:
+              warehouseId: WH01
+              quantity: 5
       responses:
         "200":
-          description: Inventory reserved successfully
-
+          description: Inventory reserved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Inventory reserved successfully
+                  data:
+                    $ref: "#/components/schemas/Inventory"
         "400":
-          description: Invalid request
-
+          description: Invalid request or warehouse not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "409":
-          description: Insufficient inventory
-
+          description: Insufficient available inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/inventory/{productId}/release:
-
     post:
-      tags:
-        - Inventory
-      summary: Release reserved inventory
-
+      tags: [Inventory]
+      summary: Release reserved stock (increment available, decrement reserved)
+      operationId: releaseInventory
       parameters:
-        - name: productId
-          in: path
-          required: true
-          schema:
-            type: string
-          example: P001
-
+        - $ref: "#/components/parameters/ProductId"
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/InventoryOperationRequest"
-
+            example:
+              warehouseId: WH01
+              quantity: 5
       responses:
         "200":
-          description: Inventory released successfully
-
+          description: Inventory released
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Inventory released successfully
+                  data:
+                    $ref: "#/components/schemas/Inventory"
         "400":
-          description: Invalid request
-
+          description: Invalid request or warehouse not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "409":
-          description: Unable to release inventory
+          description: Unable to release requested quantity (reserved < requested)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
+  # ---------------------------------------------------------------------------
+  # Warehouses
+  # ---------------------------------------------------------------------------
 
+  /api/v1/warehouses:
+    get:
+      tags: [Warehouses]
+      summary: List all warehouses
+      operationId: getWarehouses
+      responses:
+        "200":
+          description: Warehouse list retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Warehouse"
+              example:
+                data:
+                  - warehouseId: WH01
+                    name: Main Warehouse
+                    location: Colombo
+                    status: ACTIVE
+                    createdAt: "2026-08-20T10:00:00.000Z"
+                    updatedAt: "2026-08-20T10:00:00.000Z"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      tags: [Warehouses]
+      summary: Create a new warehouse
+      operationId: createWarehouse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWarehouseRequest"
+            example:
+              name: Central Warehouse
+              location: Kandy
+              status: ACTIVE
+      responses:
+        "201":
+          description: Warehouse created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Warehouse"
+        "400":
+          description: Missing or invalid name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Warehouse with this name already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/warehouses/{warehouseId}:
+    get:
+      tags: [Warehouses]
+      summary: Get a warehouse by ID
+      operationId: getWarehouseById
+      parameters:
+        - $ref: "#/components/parameters/WarehouseId"
+      responses:
+        "200":
+          description: Warehouse retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Warehouse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    put:
+      tags: [Warehouses]
+      summary: Update a warehouse
+      operationId: updateWarehouse
+      parameters:
+        - $ref: "#/components/parameters/WarehouseId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWarehouseRequest"
+            example:
+              name: Renamed Warehouse
+              location: Galle
+              status: INACTIVE
+      responses:
+        "200":
+          description: Warehouse updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Warehouse"
+        "400":
+          description: Invalid field or no fields to update
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Another warehouse already uses this name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      tags: [Warehouses]
+      summary: Delete a warehouse (blocked if it has inventory records)
+      operationId: deleteWarehouse
+      parameters:
+        - $ref: "#/components/parameters/WarehouseId"
+      responses:
+        "204":
+          description: Warehouse deleted (no body)
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot delete — warehouse has inventory records
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# -----------------------------------------------------------------------------
+# Reusable components
+# -----------------------------------------------------------------------------
 components:
+
+  parameters:
+
+    ProductId:
+      name: productId
+      in: path
+      required: true
+      description: Product identifier (e.g. `P1788767406608`)
+      schema:
+        type: string
+      example: P1788767406608
+
+    WarehouseId:
+      name: warehouseId
+      in: path
+      required: true
+      description: Warehouse identifier (e.g. `WH01`)
+      schema:
+        type: string
+      example: WH01
+
+  responses:
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: Inventory not found
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: Internal server error
 
   schemas:
 
+    # ---------- Inventory ----------
+
     Inventory:
-
       type: object
-
       properties:
-
         productId:
           type: string
-          example: P001
-
+          example: P1788767406608
         warehouseId:
           type: string
           example: WH01
-
         quantity:
           type: integer
           minimum: 0
+          description: Total stock (available + reserved)
           example: 100
-
         reservedQuantity:
           type: integer
           minimum: 0
           example: 20
-
-        availableQuantity:
+        available:
           type: integer
+          minimum: 0
+          description: quantity − reservedQuantity
           example: 80
-
         reorderLevel:
           type: integer
+          minimum: 0
           example: 10
-
         createdAt:
           type: string
           format: date-time
-
         updatedAt:
           type: string
           format: date-time
 
-
     UpdateInventoryRequest:
-
       type: object
-
       required:
         - warehouseId
-
       properties:
-
         warehouseId:
           type: string
           example: WH01
-
         quantity:
           type: integer
           minimum: 0
           example: 100
-
         reorderLevel:
           type: integer
           minimum: 0
           example: 10
 
-
     InventoryOperationRequest:
-
       type: object
-
       required:
         - warehouseId
         - quantity
-
       properties:
-
         warehouseId:
           type: string
           example: WH01
-
         quantity:
           type: integer
           minimum: 1
           example: 5
+
+    # ---------- Warehouse ----------
+
+    Warehouse:
+      type: object
+      properties:
+        warehouseId:
+          type: string
+          example: WH01
+        name:
+          type: string
+          example: Main Warehouse
+        location:
+          type: string
+          example: Colombo
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE]
+          example: ACTIVE
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateWarehouseRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          example: Central Warehouse
+        location:
+          type: string
+          example: Kandy
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE]
+          default: ACTIVE
+
+    UpdateWarehouseRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          example: Renamed Warehouse
+        location:
+          type: string
+          example: Galle
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE]
+      description: At least one of `name`, `location`, `status` must be present.
+
+    # ---------- Error ----------
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          example: Warehouse not found

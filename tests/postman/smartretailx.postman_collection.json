@@ -1,0 +1,109 @@
+{
+  "info": {
+    "name": "SmartRetailX — API Response Tests",
+    "_postman_id": "smartretailx-local",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "productUrl", "value": "http://localhost:3002" },
+    { "key": "orderUrl",   "value": "http://localhost:3003" },
+    { "key": "token",      "value": "" },
+    { "key": "productId",  "value": "" },
+    { "key": "customerId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Products — List",
+      "request": {
+        "method": "GET",
+        "url": "{{productUrl}}/api/v1/products"
+      },
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('has data array', () => {",
+            "  const b = pm.response.json();",
+            "  pm.expect(b).to.have.property('data');",
+            "  pm.expect(b.data).to.be.an('array');",
+            "});",
+            "const b = pm.response.json();",
+            "if (b.data && b.data.length > 0) {",
+            "  pm.collectionVariables.set('productId', b.data[0].productId);",
+            "}"
+          ],
+          "type": "text/javascript"
+        }
+      }]
+    },
+    {
+      "name": "Products — Get by ID",
+      "request": {
+        "method": "GET",
+        "url": "{{productUrl}}/api/v1/products/{{productId}}"
+      },
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('has productId', () => {",
+            "  pm.expect(pm.response.json().data).to.have.property('productId');",
+            "});"
+          ],
+          "type": "text/javascript"
+        }
+      }]
+    },
+    {
+      "name": "Orders — List (auth)",
+      "request": {
+        "method": "GET",
+        "url": "{{orderUrl}}/api/v1/orders",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ]
+      },
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('has data array', () => {",
+            "  pm.expect(pm.response.json().data).to.be.an('array');",
+            "});"
+          ],
+          "type": "text/javascript"
+        }
+      }]
+    },
+    {
+      "name": "Orders — Create",
+      "request": {
+        "method": "POST",
+        "url": "{{orderUrl}}/api/v1/orders",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"customerId\": \"{{customerId}}\",\n  \"items\": [{ \"productId\": \"{{productId}}\", \"quantity\": 1 }],\n  \"shippingAddress\": {\n    \"street\": \"1 Test St\", \"city\": \"Testville\",\n    \"postalCode\": \"TEST1\", \"country\": \"United Kingdom\", \"countryCode\": \"GB\"\n  },\n  \"currency\": \"GBP\"\n}"
+        }
+      },
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "pm.test('201 Created', () => pm.response.to.have.status(201));",
+            "pm.test('has orderId', () => {",
+            "  pm.expect(pm.response.json().data).to.have.property('orderId');",
+            "});"
+          ],
+          "type": "text/javascript"
+        }
+      }]
+    }
+  ]
+}

@@ -2,8 +2,38 @@ openapi: 3.0.3
 
 info:
   title: SmartRetailX Payment API
-  description: Payment processing API for SmartRetailX.
-  version: 1.0.0
+  description: |
+    Payment processing API for SmartRetailX, backed by Stripe.
+
+    **Flow (Stripe-enabled mode, `USE_STRIPE=true`):**
+    1. Frontend calls `POST /create-payment-intent` → receives a Stripe `clientSecret`
+    2. Frontend confirms the card with Stripe.js
+    3. Frontend calls `POST /confirm-payment` with the succeeded `paymentIntentId`
+    4. payment-service persists the payment and publishes `PaymentCompleted`
+
+    **Flow (mock mode, `USE_STRIPE=false`):**
+    The SQS consumer processes `InventoryReserved` events automatically and
+    publishes `PaymentCompleted` / `PaymentFailed`. In mock mode **no payment
+    rows are written** — only the event is emitted.
+
+    **Authentication:** none. These routes are intentionally unauthenticated
+    because they are called by the frontend during the checkout flow, where
+    the Stripe `paymentIntentId` acts as the authorization token.
+
+    **Field naming caveat:** responses from `GET` endpoints return raw
+    Postgres rows with **snake_case** keys (`payment_id`, `transaction_ref`).
+    The `POST /confirm-payment` response returns a **camelCase** object
+    (`paymentId`, `transactionRef`) because it is built in the controller
+    rather than read from the database. This inconsistency is preserved for
+    backward compatibility with the frontend.
+
+    **Amount fields** are represented as **strings** when read from the
+    database (Postgres `DECIMAL` behaviour under node-postgres) but as
+    **numbers** in the `confirm-payment` response (as sent by the client).
+  version: 1.1.0
+  contact:
+    name: SmartRetailX
+    url: https://github.com/smartretailx
 
 servers:
   - url: http://localhost:3005
@@ -11,184 +41,529 @@ servers:
 
 tags:
   - name: Payments
-    description: Payment management operations
+    description: Read and refund existing payments
+  - name: Stripe Checkout
+    description: Endpoints used during the Stripe payment flow
 
 paths:
 
+  # ---------------------------------------------------------------------------
+  # Read operations
+  # ---------------------------------------------------------------------------
+
   /api/v1/payments:
-
     get:
-      tags:
-        - Payments
-      summary: Get all payments
-
+      tags: [Payments]
+      summary: List all payments
+      description: Returns every payment, newest first.
+      operationId: getPayments
       responses:
         "200":
-          description: Payments retrieved successfully
+          description: Payments retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PaymentRow"
+              example:
+                data:
+                  - payment_id: PAY1790003080488
+                    order_id: ORD1790003079887
+                    customer_id: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
+                    amount: "627.00"
+                    currency: GBP
+                    status: COMPLETED
+                    provider: STRIPE
+                    transaction_ref: pi_3UHxVl8xpnqIEEw31NikdRzK
+                    created_at: "2026-09-21T15:04:41.000Z"
+                    updated_at: "2026-09-21T15:04:41.000Z"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
+  /api/v1/payments/order/{orderId}:
+    get:
+      tags: [Payments]
+      summary: List all payments for an order
+      description: |
+        Returns every payment attempt associated with the given order. Most
+        orders have a single payment; refunds produce additional records
+        only when a new payment is created after a refund.
+      operationId: getPaymentsByOrder
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: Payments retrieved (empty array if order has none)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PaymentRow"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/payments/{paymentId}:
+    get:
+      tags: [Payments]
+      summary: Get a payment by ID
+      operationId: getPaymentById
+      parameters:
+        - $ref: "#/components/parameters/PaymentId"
+      responses:
+        "200":
+          description: Payment retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/PaymentRow"
+        "404":
+          $ref: "#/components/responses/PaymentNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # Stripe checkout flow
+  # ---------------------------------------------------------------------------
+
+  /api/v1/payments/create-payment-intent:
     post:
-      tags:
-        - Payments
-      summary: Create a payment
+      tags: [Stripe Checkout]
+      summary: Create a Stripe PaymentIntent
+      description: |
+        Creates a Stripe PaymentIntent for the given order and returns the
+        `clientSecret` which the frontend passes to Stripe.js.
 
+        **Important:** the amount is sent in **major units** (pounds, not
+        pence). The service multiplies by 100 internally before calling Stripe.
+      operationId: createPaymentIntent
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CreatePaymentRequest"
-
+              $ref: "#/components/schemas/CreatePaymentIntentRequest"
+            example:
+              orderId: ORD1790003079887
+              customerId: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
+              amount: 627.00
+              currency: GBP
       responses:
-        "201":
-          description: Payment created successfully
-
+        "200":
+          description: PaymentIntent created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentIntentResponse"
+              example:
+                clientSecret: pi_3UHxVl8xpnqIEEw31NikdRzK_secret_abc123
+                paymentIntentId: pi_3UHxVl8xpnqIEEw31NikdRzK
         "400":
-          description: Invalid payment request
+          description: Missing orderId, customerId, or amount
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: orderId, customerId and amount are required
+        "500":
+          description: |
+            Stripe API error (invalid key, currency mismatch, network issue)
+            or missing `STRIPE_SECRET_KEY` environment variable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: Failed to create payment intent
 
+  /api/v1/payments/confirm-payment:
+    post:
+      tags: [Stripe Checkout]
+      summary: Confirm a succeeded PaymentIntent
+      description: |
+        Called by the frontend after Stripe.js reports the payment as
+        `succeeded`. The service:
 
-  /api/v1/payments/{paymentId}:
+        1. Verifies the PaymentIntent status with Stripe
+        2. Persists a `COMPLETED` payment row
+        3. Publishes a `PaymentCompleted` event on EventBridge
 
-    get:
-      tags:
-        - Payments
-      summary: Get payment by ID
-
-      parameters:
-        - name: paymentId
-          in: path
-          required: true
-          schema:
-            type: string
-          example: PAY1001
-
+        **Items array:** passing `items` (with `productName`) here is what
+        allows the notification-service to build messages like
+        `"Your 'Buldak Ramen' will be delivered shortly."` If items are
+        omitted, downstream notifications fall back to `"your order"`.
+      operationId: confirmPayment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmPaymentRequest"
+            example:
+              paymentIntentId: pi_3UHxVl8xpnqIEEw31NikdRzK
+              orderId: ORD1790003079887
+              customerId: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
+              amount: 627.00
+              currency: GBP
+              items:
+                - productId: P1788767406608
+                  productName: Buldak Ramen
+                  quantity: 1
+              warehouseId: WH01
       responses:
         "200":
-          description: Payment retrieved successfully
+          description: Payment confirmed and `PaymentCompleted` published
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Payment confirmed successfully
+                  payment:
+                    $ref: "#/components/schemas/PaymentCamel"
+        "400":
+          description: |
+            Missing required fields, or Stripe reports the PaymentIntent
+            is not in `succeeded` state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingFields:
+                  value:
+                    error: paymentIntentId, orderId, customerId and amount are required
+                notSucceeded:
+                  value:
+                    error: Payment not successful
+        "500":
+          $ref: "#/components/responses/InternalError"
 
-        "404":
-          description: Payment not found
-
-
-  /api/v1/payments/order/{orderId}:
-
-    get:
-      tags:
-        - Payments
-      summary: Get payments for an order
-
-      parameters:
-        - name: orderId
-          in: path
-          required: true
-          schema:
-            type: string
-          example: ORD1001
-
-      responses:
-        "200":
-          description: Payments retrieved successfully
-
+  # ---------------------------------------------------------------------------
+  # Refund
+  # ---------------------------------------------------------------------------
 
   /api/v1/payments/{paymentId}/refund:
-
     post:
-      tags:
-        - Payments
+      tags: [Payments]
       summary: Refund a completed payment
+      description: |
+        Marks a payment as `REFUNDED` in the database.
 
+        **Note:** this is a state change only — no call is made to Stripe's
+        refund API. In a production system this endpoint would call
+        `stripe.refunds.create({ payment_intent: transaction_ref })` and
+        then update the row.
+      operationId: refundPayment
       parameters:
-        - name: paymentId
-          in: path
-          required: true
-          schema:
-            type: string
-          example: PAY1001
-
+        - $ref: "#/components/parameters/PaymentId"
       responses:
         "200":
-          description: Payment refunded successfully
-
+          description: Payment marked as refunded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Payment refunded successfully
+                  data:
+                    $ref: "#/components/schemas/PaymentRow"
         "404":
-          description: Payment not found
-
+          $ref: "#/components/responses/PaymentNotFound"
         "409":
-          description: Payment cannot be refunded
+          description: Payment is not in a refundable state (only `COMPLETED` can be refunded)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: Only completed payments can be refunded
+        "500":
+          $ref: "#/components/responses/InternalError"
 
-
+# -----------------------------------------------------------------------------
+# Reusable components
+# -----------------------------------------------------------------------------
 components:
+
+  parameters:
+
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      description: Payment identifier
+      schema:
+        type: string
+      example: PAY1790003080488
+
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      description: Order identifier
+      schema:
+        type: string
+      example: ORD1790003079887
+
+  responses:
+
+    PaymentNotFound:
+      description: Payment not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: Payment not found
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: Internal server error
 
   schemas:
 
-    CreatePaymentRequest:
+    # -------------------------------------------------------------------------
+    # Payment row — snake_case (raw Postgres columns)
+    # -------------------------------------------------------------------------
 
+    PaymentRow:
       type: object
+      description: |
+        Raw payment row as returned by the PostgreSQL repository.
+        Field names mirror the database column names (**snake_case**).
+      properties:
+        payment_id:
+          type: string
+          example: PAY1790003080488
+        order_id:
+          type: string
+          example: ORD1790003079887
+        customer_id:
+          type: string
+          description: Cognito `sub` of the customer
+          example: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
+        amount:
+          type: string
+          description: |
+            Amount as a decimal string (Postgres `DECIMAL` returns as string
+            via node-postgres to prevent float precision loss).
+          example: "627.00"
+        currency:
+          type: string
+          description: ISO 4217 currency code
+          example: GBP
+        status:
+          $ref: "#/components/schemas/PaymentStatus"
+        provider:
+          type: string
+          description: Payment processor identifier
+          enum: [STRIPE]
+          example: STRIPE
+        transaction_ref:
+          type: string
+          nullable: true
+          description: Stripe PaymentIntent ID (or null if never confirmed)
+          example: pi_3UHxVl8xpnqIEEw31NikdRzK
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-09-21T15:04:41.000Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2026-09-21T15:04:41.000Z"
 
+    # -------------------------------------------------------------------------
+    # Payment — camelCase (built manually in the confirm-payment controller)
+    # -------------------------------------------------------------------------
+
+    PaymentCamel:
+      type: object
+      description: |
+        Payment object as returned by `POST /confirm-payment`. This is
+        **not** the same shape as `PaymentRow` — it uses camelCase keys and
+        the `amount` is the value the client sent (a number), not the
+        database's string representation.
+      properties:
+        paymentId:
+          type: string
+          example: PAY1790003080488
+        orderId:
+          type: string
+          example: ORD1790003079887
+        customerId:
+          type: string
+          example: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
+        amount:
+          type: number
+          format: double
+          description: Amount in major units, as supplied by the client
+          example: 627.00
+        currency:
+          type: string
+          example: GBP
+        status:
+          $ref: "#/components/schemas/PaymentStatus"
+        provider:
+          type: string
+          enum: [STRIPE]
+          example: STRIPE
+        transactionRef:
+          type: string
+          example: pi_3UHxVl8xpnqIEEw31NikdRzK
+
+    PaymentStatus:
+      type: string
+      description: |
+        Statuses actually written by the current code:
+        - `COMPLETED` — set by `POST /confirm-payment`
+        - `REFUNDED`  — set by `POST /{paymentId}/refund`
+
+        The Stripe-processing paths (mock or webhook) do not persist a row,
+        so `PENDING` / `AUTHORIZED` / `FAILED` are not currently produced.
+      enum:
+        - PENDING
+        - AUTHORIZED
+        - COMPLETED
+        - FAILED
+        - REFUNDED
+      example: COMPLETED
+
+    # -------------------------------------------------------------------------
+    # Request bodies
+    # -------------------------------------------------------------------------
+
+    CreatePaymentIntentRequest:
+      type: object
       required:
         - orderId
         - customerId
         - amount
-
       properties:
-
         orderId:
           type: string
-          example: ORD1001
-
+          example: ORD1790003079887
         customerId:
           type: string
-          example: U001
-
+          example: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
         amount:
           type: number
           format: double
           minimum: 0.01
-          example: 49.98
-
+          description: Amount in **major units** (e.g. `627.00` for £627.00)
+          example: 627.00
         currency:
           type: string
           default: GBP
           example: GBP
 
-
-    Payment:
-
+    ConfirmPaymentRequest:
       type: object
-
+      required:
+        - paymentIntentId
+        - orderId
+        - customerId
+        - amount
       properties:
-
-        payment_id:
+        paymentIntentId:
           type: string
-          example: PAY1001
-
-        order_id:
+          description: Stripe PaymentIntent ID (returned by create-payment-intent)
+          example: pi_3UHxVl8xpnqIEEw31NikdRzK
+        orderId:
           type: string
-          example: ORD1001
-
-        customer_id:
+          example: ORD1790003079887
+        customerId:
           type: string
-          example: U001
-
+          example: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
         amount:
           type: number
-          example: 49.98
-
+          format: double
+          minimum: 0.01
+          description: Amount in major units
+          example: 627.00
         currency:
           type: string
+          default: GBP
           example: GBP
-
-        status:
+        items:
+          type: array
+          description: |
+            Optional but recommended. Passing `productName` here lets the
+            notification-service produce messages like
+            `"Your 'Buldak Ramen' will be delivered shortly."`
+          items:
+            $ref: "#/components/schemas/ConfirmPaymentItem"
+        warehouseId:
           type: string
-          enum:
-            - PENDING
-            - AUTHORIZED
-            - COMPLETED
-            - FAILED
-            - REFUNDED
+          description: Optional warehouse hint (defaults to WH01 downstream)
+          example: WH01
 
-        provider:
+    ConfirmPaymentItem:
+      type: object
+      required:
+        - productId
+        - quantity
+      properties:
+        productId:
           type: string
-          example: MOCK_GATEWAY
+          example: P1788767406608
+        productName:
+          type: string
+          example: Buldak Ramen
+        quantity:
+          type: integer
+          minimum: 1
+          example: 1
 
-        transaction_ref:
+    # -------------------------------------------------------------------------
+    # Stripe response wrapper
+    # -------------------------------------------------------------------------
+
+    PaymentIntentResponse:
+      type: object
+      description: Returned by `POST /create-payment-intent`
+      properties:
+        clientSecret:
           type: string
-          nullable: true
+          description: |
+            Pass this to `stripe.confirmCardPayment(clientSecret, ...)` in
+            Stripe.js. Never log or store this value.
+          example: pi_3UHxVl8xpnqIEEw31NikdRzK_secret_abc123
+        paymentIntentId:
+          type: string
+          description: The PaymentIntent ID (also embedded in `clientSecret`)
+          example: pi_3UHxVl8xpnqIEEw31NikdRzK
+
+    # -------------------------------------------------------------------------
+    # Error
+    # -------------------------------------------------------------------------
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          example: Payment not found

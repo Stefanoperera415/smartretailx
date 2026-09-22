@@ -1,5 +1,12 @@
 const { dynamoDB, INVENTORY_TABLE } = require("../config/database");
-const { GetCommand, PutCommand, UpdateCommand, QueryCommand } = require("@aws-sdk/lib-dynamodb");
+const {
+  GetCommand,
+  PutCommand,
+  UpdateCommand,
+  QueryCommand,
+  ScanCommand,     // ✅ added
+  DeleteCommand,   // ✅ added
+} = require("@aws-sdk/lib-dynamodb");
 
 async function findByProductId(productId) {
   const result = await dynamoDB.send(
@@ -23,8 +30,9 @@ async function findOne(productId, warehouseId) {
 }
 
 /**
- * Upsert inventory item.
- * Sets quantity, reorderLevel, reservedQuantity (0), and available (quantity).
+ * Upsert inventory item – FIXED `available` calculation.
+ * Sets quantity, reorderLevel, preserves existing reservedQuantity,
+ * and sets available = quantity - reservedQuantity.
  */
 async function upsert(productId, warehouseId, quantity, reorderLevel = 10) {
   const result = await dynamoDB.send(
@@ -35,7 +43,7 @@ async function upsert(productId, warehouseId, quantity, reorderLevel = 10) {
         SET #qty = :qty,
             #reorder = :reorder,
             #reserved = if_not_exists(#reserved, :zero),
-            #available = :qty
+            #available = :qty - if_not_exists(#reserved, :zero)
       `,
       ExpressionAttributeNames: {
         "#qty": "quantity",
@@ -112,7 +120,6 @@ async function releaseStock(productId, warehouseId, quantity) {
   return result.Attributes;
 }
 
-
 async function findAll() {
   const result = await dynamoDB.send(
     new ScanCommand({
@@ -132,7 +139,6 @@ async function deleteInventory(productId, warehouseId) {
   );
   return !!result.Attributes; // true if something was deleted
 }
-
 
 module.exports = {
   findByProductId,

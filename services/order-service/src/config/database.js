@@ -3,7 +3,6 @@ require("dotenv").config();
 const { Pool } = require("pg");
 const { Signer } = require("@aws-sdk/rds-signer");
 
-// Retry helper
 async function withRetry(fn, maxAttempts = 5, delay = 1000) {
   let lastError;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -26,8 +25,6 @@ async function createPool() {
   const user = process.env.PG_USER;
   const database = process.env.PG_DATABASE || "postgres";
 
-  // If PG_PASSWORD is provided, use plain password (for local dev)
-  // Otherwise use IAM authentication (for production)
   let password;
   if (process.env.PG_PASSWORD) {
     password = process.env.PG_PASSWORD;
@@ -60,37 +57,38 @@ let pool;
 
 async function connectDatabase() {
   try {
-    // Create pool with retries
     pool = await withRetry(async () => {
       const newPool = await createPool();
-      // Test connection
       const client = await newPool.connect();
-      const result = await client.query(`
-        SELECT current_database() AS database,
-               inet_server_addr() AS server_ip,
-               inet_server_port() AS server_port,
-               version() AS postgres_version
-      `);
-      console.log("========================================");
-      console.log("Connected to Aurora PostgreSQL (Order Service)");
-      console.log("Database:", result.rows[0].database);
-      console.log("Server IP:", result.rows[0].server_ip);
-      console.log("Server Port:", result.rows[0].server_port);
-      console.log("PostgreSQL Version:", result.rows[0].postgres_version);
-      console.log("========================================");
+      await client.query(`SELECT 1`);
       client.release();
       return newPool;
     }, 5, 2000);
 
     await initializeDatabase();
+
+    // ✅ Refresh IAM token every 10 minutes (tokens expire at 15)
+    setInterval(async () => {
+      try {
+        console.log("🔄 Refreshing Aurora IAM token...");
+        const newPool = await createPool();
+        const oldPool = pool;
+        pool = newPool;
+        setTimeout(() => oldPool.end().catch(() => {}), 5000);
+        console.log("✅ Aurora pool refreshed.");
+      } catch (err) {
+        console.error("Failed to refresh Aurora pool:", err.message);
+      }
+    }, 10 * 60 * 1000);
+
   } catch (error) {
-    console.error("Aurora PostgreSQL connection failed after retries:", error);
+    console.error("Aurora PostgreSQL connection failed:", error);
     process.exit(1);
   }
 }
 
 async function initializeDatabase() {
-  // Create orders table
+  // 1) Create tables (if missing)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS orders (
       order_id VARCHAR(50) PRIMARY KEY,
@@ -107,15 +105,30 @@ async function initializeDatabase() {
       order_item_id SERIAL PRIMARY KEY,
       order_id VARCHAR(50) NOT NULL REFERENCES orders(order_id) ON DELETE CASCADE,
       product_id VARCHAR(50) NOT NULL,
+      product_name VARCHAR(255),            -- ✅ NEW
       quantity INTEGER NOT NULL CHECK (quantity > 0),
       unit_price DECIMAL(10,2) NOT NULL,
       subtotal DECIMAL(10,2) NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS processed_events (
+      event_id VARCHAR(191) NOT NULL PRIMARY KEY,
+      event_type VARCHAR(100) NOT NULL,
+      processed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
     CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
+  `);
 
-    -- Auto‑update updated_at
+  // 2) Migration: add product_name if table already existed without it
+  await pool.query(`
+    ALTER TABLE order_items
+      ADD COLUMN IF NOT EXISTS product_name VARCHAR(255);
+  `);
+
+  // 3) Trigger function + trigger (idempotent)
+  await pool.query(`
     CREATE OR REPLACE FUNCTION update_updated_at_column()
     RETURNS TRIGGER AS $$
     BEGIN
@@ -131,12 +144,10 @@ async function initializeDatabase() {
       EXECUTE FUNCTION update_updated_at_column();
   `);
 
-  console.log("Order database schema verified (tables created if missing).");
+  console.log("Order database schema verified (tables + product_name column ensured).");
 }
 
 module.exports = {
-  get pool() {
-    return pool;
-  },
+  get pool() { return pool; },
   connectDatabase,
 };

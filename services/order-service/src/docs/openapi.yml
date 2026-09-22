@@ -2,8 +2,23 @@ openapi: 3.0.3
 
 info:
   title: SmartRetailX Order Processing API
-  description: REST API for order creation and order lifecycle management.
-  version: 1.0.0
+  description: |
+    REST API for order creation and lifecycle management.
+
+    **Authentication:** all endpoints require a Cognito-issued ID token in the
+    `Authorization: Bearer <token>` header. The token's `sub` claim identifies
+    the caller; `cognito:groups` determines the role (ADMIN / STAFF / CUSTOMER).
+
+    **Events:** creating an order publishes an `OrderCreated` event on the
+    EventBridge bus, which triggers downstream inventory → payment →
+    notification workflows.
+
+    **Response envelope:** every successful response wraps its payload in
+    `{ "data": ... }`. Errors are `{ "error": "..." }`.
+  version: 1.1.0
+  contact:
+    name: SmartRetailX
+    url: https://github.com/smartretailx
 
 servers:
   - url: http://localhost:3003
@@ -11,19 +26,26 @@ servers:
 
 tags:
   - name: Orders
-    description: Order management operations
+    description: Order lifecycle operations
 
 paths:
+
   /api/v1/orders:
     get:
-      tags:
-        - Orders
-      summary: Get all orders
+      tags: [Orders]
+      summary: List all orders
+      description: |
+        Returns every order in the system, newest first.
+
+        **Role:** any authenticated user. In production this endpoint is
+        intended for ADMIN / STAFF only — customer-specific queries should
+        use `GET /customer/{userId}`.
+      operationId: getOrders
       security:
         - bearerAuth: []
       responses:
         "200":
-          description: Orders retrieved successfully
+          description: Orders retrieved
           content:
             application/json:
               schema:
@@ -34,13 +56,28 @@ paths:
                     items:
                       $ref: "#/components/schemas/Order"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
     post:
-      tags:
-        - Orders
+      tags: [Orders]
       summary: Create a new order
-      description: The inventory service will automatically select the best warehouse for each product.
+      description: |
+        Creates an order, publishes `OrderCreated` on EventBridge, and lets
+        downstream services handle inventory reservation and payment.
+
+        **Unit price is server-authoritative.** The client supplies only
+        `productId` and `quantity`; order-service fetches the current price
+        from product-service. Any `unitPrice` sent by the client is ignored.
+
+        **Warehouse selection.** If `warehouseId` is provided, inventory tries
+        to reserve there first. Otherwise it automatically picks the
+        warehouse with the most available stock for each product.
+
+        **Role:** ADMIN and STAFF can create orders for anyone. CUSTOMER can
+        only create orders where `customerId` matches their own `sub`.
+      operationId: createOrder
       security:
         - bearerAuth: []
       requestBody:
@@ -49,9 +86,22 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/CreateOrderRequest"
+            example:
+              customerId: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
+              currency: GBP
+              items:
+                - productId: P1788767406608
+                  quantity: 1
+              shippingAddress:
+                street: 123 Main Street
+                city: London
+                postalCode: SW1A 1AA
+                country: United Kingdom
+                countryCode: GB
+              warehouseId: WH01
       responses:
         "201":
-          description: Order created successfully
+          description: Order created and event published
           content:
             application/json:
               schema:
@@ -59,28 +109,76 @@ paths:
                 properties:
                   data:
                     $ref: "#/components/schemas/Order"
+              example:
+                data:
+                  orderId: ORD1790003079887
+                  customerId: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
+                  status: PENDING
+                  totalAmount: "627.00"
+                  currency: GBP
+                  shippingAddress:
+                    street: 123 Main Street
+                    city: London
+                    postalCode: SW1A 1AA
+                    country: United Kingdom
+                    countryCode: GB
+                  items:
+                    - orderItemId: 793
+                      productId: P1788767406608
+                      productName: Buldak Ramen
+                      quantity: 1
+                      unitPrice: "627.00"
+                      subtotal: "627.00"
+                  createdAt: "2026-09-21T15:04:39.887Z"
+                  updatedAt: "2026-09-21T15:04:39.887Z"
         "400":
-          description: Invalid request
+          description: |
+            Validation failed — missing customerId, empty items, missing
+            shippingAddress, invalid productId/quantity, or a product ID that
+            doesn't exist in product-service.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingCustomer:
+                  value: { error: "customerId is required" }
+                emptyItems:
+                  value: { error: "At least one order item is required" }
+                badItem:
+                  value: { error: "Each item requires a valid productId and positive integer quantity" }
+                unknownProduct:
+                  value: { error: "Product P9999 does not exist" }
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: CUSTOMER tried to create an order for a different customer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: You can only create orders for yourself
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/orders/customer/{userId}:
     get:
-      tags:
-        - Orders
-      summary: Get all orders for a customer
+      tags: [Orders]
+      summary: List orders for a customer
+      description: |
+        Returns the 100 most recent orders for the given customer, newest first.
+
+        **Role:** CUSTOMER can only call this for their own `sub`. ADMIN and
+        STAFF can call it for anyone.
+      operationId: getOrdersByCustomer
       security:
         - bearerAuth: []
       parameters:
-        - name: userId
-          in: path
-          required: true
-          schema:
-            type: string
-          example: U001
+        - $ref: "#/components/parameters/UserId"
       responses:
         "200":
-          description: Customer orders retrieved successfully
+          description: Customer orders retrieved
           content:
             application/json:
               schema:
@@ -91,27 +189,30 @@ paths:
                     items:
                       $ref: "#/components/schemas/Order"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
         "403":
-          description: Forbidden – customer can only view their own orders
+          description: CUSTOMER tried to view another customer's orders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: You can only view your own orders
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/orders/{orderId}:
     get:
-      tags:
-        - Orders
+      tags: [Orders]
       summary: Get an order by ID
+      operationId: getOrderById
       security:
         - bearerAuth: []
       parameters:
-        - name: orderId
-          in: path
-          required: true
-          schema:
-            type: string
-          example: ORD001
+        - $ref: "#/components/parameters/OrderId"
       responses:
         "200":
-          description: Order retrieved successfully
+          description: Order retrieved
           content:
             application/json:
               schema:
@@ -119,34 +220,41 @@ paths:
                 properties:
                   data:
                     $ref: "#/components/schemas/Order"
-        "404":
-          description: Order not found
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/orders/{orderId}/status:
     patch:
-      tags:
-        - Orders
+      tags: [Orders]
       summary: Update order status
+      description: |
+        **Role:** ADMIN and STAFF only. CUSTOMER cannot call this endpoint
+        (returns 403).
+
+        Typical use cases:
+        - Admin manually cancels an order after customer request
+        - Warehouse staff marks an order as SHIPPED / DELIVERED
+        - Debugging / testing status transitions
+      operationId: updateOrderStatus
       security:
         - bearerAuth: []
       parameters:
-        - name: orderId
-          in: path
-          required: true
-          schema:
-            type: string
-          example: ORD001
+        - $ref: "#/components/parameters/OrderId"
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/UpdateOrderStatusRequest"
+            example:
+              status: SHIPPED
       responses:
         "200":
-          description: Order status updated successfully
+          description: Status updated
           content:
             application/json:
               schema:
@@ -155,48 +263,121 @@ paths:
                   data:
                     $ref: "#/components/schemas/Order"
         "400":
-          description: Invalid status
-        "404":
-          description: Order not found
+          description: Missing or invalid status value
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missing:
+                  value: { error: "status is required" }
+                invalid:
+                  value: { error: "Invalid status. Allowed values: PENDING, CONFIRMED, PROCESSING, SHIPPED, DELIVERED, CANCELLED, PAYMENT_FAILED" }
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
         "403":
-          description: Forbidden – customers cannot update status
+          description: CUSTOMER tried to change status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: Customers cannot update order status
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
+# -----------------------------------------------------------------------------
+# Reusable components
+# -----------------------------------------------------------------------------
 components:
+
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+      description: |
+        Cognito ID token. The token's `sub` claim identifies the caller; the
+        `cognito:groups` claim maps to a role (ADMIN | STAFF | CUSTOMER).
+
+  parameters:
+
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      description: Order identifier
+      schema:
+        type: string
+      example: ORD1790003079887
+
+    UserId:
+      name: userId
+      in: path
+      required: true
+      description: Cognito `sub` of the customer
+      schema:
+        type: string
+      example: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
+
+  responses:
+
+    Unauthorized:
+      description: Missing, invalid, or expired bearer token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: Authorization header missing or invalid
+
+    NotFound:
+      description: Order not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: Order not found
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: Internal server error
 
   schemas:
+
+    # -------------------------------------------------------------------------
+    # Response objects
+    # -------------------------------------------------------------------------
+
     Order:
       type: object
       properties:
         orderId:
           type: string
-          example: ORD001
+          example: ORD1790003079887
         customerId:
           type: string
-          example: U001
+          description: Cognito `sub` of the customer
+          example: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
         status:
-          type: string
-          enum:
-            - PENDING
-            - CONFIRMED
-            - PROCESSING
-            - SHIPPED
-            - DELIVERED
-            - CANCELLED
-            - PAYMENT_FAILED
-          example: PENDING
+          $ref: "#/components/schemas/OrderStatus"
         totalAmount:
-          type: number
-          format: double
-          example: 49.98
+          type: string
+          description: |
+            Total amount as a decimal string. Postgres DECIMAL columns are
+            returned as strings by node-postgres to avoid precision loss.
+          example: "627.00"
         currency:
           type: string
+          description: ISO 4217 currency code
           example: GBP
         shippingAddress:
           $ref: "#/components/schemas/ShippingAddress"
@@ -207,49 +388,61 @@ components:
         createdAt:
           type: string
           format: date-time
+          example: "2026-09-21T15:04:39.887Z"
         updatedAt:
           type: string
           format: date-time
+          example: "2026-09-21T15:04:39.887Z"
 
     OrderItem:
       type: object
+      description: A line item in a placed order. Prices are snapshots from order time.
       properties:
+        orderItemId:
+          type: integer
+          example: 793
         productId:
           type: string
-          example: P001
+          example: P1788767406608
+        productName:
+          type: string
+          description: Human-readable product name captured at order time
+          example: Buldak Ramen
         quantity:
           type: integer
           minimum: 1
-          example: 2
+          example: 1
         unitPrice:
-          type: number
-          format: double
-          example: 2.99
+          type: string
+          description: Unit price as decimal string
+          example: "627.00"
         subtotal:
-          type: number
-          format: double
-          example: 5.98
+          type: string
+          description: quantity × unitPrice, as decimal string
+          example: "627.00"
 
-    ShippingAddress:
-      type: object
-      required:
-        - line1
-        - city
-        - postcode
-        - country
-      properties:
-        line1:
-          type: string
-          example: 123 Main Street
-        city:
-          type: string
-          example: London
-        postcode:
-          type: string
-          example: SW1A 1AA
-        country:
-          type: string
-          example: United Kingdom
+    OrderStatus:
+      type: string
+      enum:
+        - PENDING
+        - CONFIRMED
+        - PROCESSING
+        - SHIPPED
+        - DELIVERED
+        - CANCELLED
+        - PAYMENT_FAILED
+      description: |
+        Lifecycle transitions (typical happy path):
+        `PENDING → CONFIRMED → PROCESSING → SHIPPED → DELIVERED`
+
+        Failure paths:
+        - `PENDING → PAYMENT_FAILED` (payment rejected)
+        - `PENDING → CANCELLED` (inventory reservation failed)
+      example: PENDING
+
+    # -------------------------------------------------------------------------
+    # Request bodies
+    # -------------------------------------------------------------------------
 
     CreateOrderRequest:
       type: object
@@ -260,7 +453,10 @@ components:
       properties:
         customerId:
           type: string
-          example: U001
+          description: |
+            Cognito `sub` of the customer the order is for. Must equal the
+            caller's `sub` unless the caller is ADMIN or STAFF.
+          example: 3153cd9a-e0e1-7052-ad0c-0af989d0ff51
         currency:
           type: string
           default: GBP
@@ -272,27 +468,57 @@ components:
             $ref: "#/components/schemas/CreateOrderItem"
         shippingAddress:
           $ref: "#/components/schemas/ShippingAddress"
-        # warehouseId removed – inventory service now auto‑selects
+        warehouseId:
+          type: string
+          description: |
+            Optional. If provided, inventory tries to reserve there first.
+            If omitted, inventory auto-selects the warehouse with the most
+            available stock for each product.
+          example: WH01
 
     CreateOrderItem:
       type: object
       required:
         - productId
         - quantity
-        - unitPrice
       properties:
         productId:
           type: string
-          example: P001
+          example: P1788767406608
         quantity:
           type: integer
           minimum: 1
-          example: 2
-        unitPrice:
-          type: number
-          format: double
-          minimum: 0
-          example: 2.99
+          example: 1
+      description: |
+        Note: **unit price is not sent by the client.** order-service fetches
+        the current price from product-service and uses that as the source of
+        truth.
+
+    ShippingAddress:
+      type: object
+      required:
+        - street
+        - city
+        - postalCode
+        - country
+      properties:
+        street:
+          type: string
+          example: 123 Main Street
+        city:
+          type: string
+          example: London
+        postalCode:
+          type: string
+          example: SW1A 1AA
+        country:
+          type: string
+          description: Human-readable country name
+          example: United Kingdom
+        countryCode:
+          type: string
+          description: ISO 3166-1 alpha-2 country code (optional; useful for Stripe)
+          example: GB
 
     UpdateOrderStatusRequest:
       type: object
@@ -300,13 +526,17 @@ components:
         - status
       properties:
         status:
+          $ref: "#/components/schemas/OrderStatus"
+
+    # -------------------------------------------------------------------------
+    # Error
+    # -------------------------------------------------------------------------
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
           type: string
-          enum:
-            - PENDING
-            - CONFIRMED
-            - PROCESSING
-            - SHIPPED
-            - DELIVERED
-            - CANCELLED
-            - PAYMENT_FAILED
-          example: CONFIRMED
+          example: Order not found

@@ -10,6 +10,7 @@ const { connectDatabase } = require("./config/database");
 const { connectEventBridge } = require("./config/eventbridge");
 const { startInventoryConsumer } = require("./events/inventoryConsumer");
 const inventoryRoutes = require("./routes/inventory");
+const warehouseRoutes = require("./routes/warehouses");
 
 const app = express();
 const PORT = process.env.PORT || 3004;
@@ -28,6 +29,7 @@ app.get("/health", (req, res) => {
 
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 app.use("/api/v1/inventory", inventoryRoutes);
+app.use("/api/v1/warehouses", warehouseRoutes); // Add warehouse routes
 
 app.use((req, res) => {
   res.status(404).json({ error: "Route not found" });

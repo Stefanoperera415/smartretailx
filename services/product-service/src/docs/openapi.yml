@@ -3,9 +3,26 @@ openapi: 3.0.3
 info:
   title: SmartRetailX Product Catalogue API
   description: |
-    Product catalogue management API for SmartRetailX.  
-    **New:** When a product is created with `initialStock`, an inventory record is automatically created (via EventBridge) in the inventory service.
-  version: 1.0.0
+    Product and category management for SmartRetailX.
+
+    **Image handling.** Product images are stored in S3 and returned as
+    time-limited signed URLs (`imageUrl`). The S3 key is opaque to the client;
+    sending that URL back to the API has no effect.
+
+    **Events.** Creating a product publishes a `ProductCreated` event. The
+    inventory-service consumes it and, if `initialStock > 0` is provided,
+    creates an inventory record in the specified warehouse (or the first
+    active warehouse if `warehouseId` is omitted).
+
+    **Authentication.** All product and category endpoints are **public**.
+    Write operations are expected to be restricted at the API gateway layer
+    in production, but there is no auth check in the service itself.
+
+    **Response envelope.** Success → `{ "data": ... }`. Errors → `{ "error": "..." }`.
+  version: 1.1.0
+  contact:
+    name: SmartRetailX
+    url: https://github.com/smartretailx
 
 servers:
   - url: http://localhost:3002
@@ -14,15 +31,26 @@ servers:
 tags:
   - name: Products
     description: Product catalogue operations
+  - name: Categories
+    description: Product category management
 
 paths:
+
+  # ---------------------------------------------------------------------------
+  # Products
+  # ---------------------------------------------------------------------------
+
   /api/v1/products:
     get:
       tags: [Products]
-      summary: Get all products
+      summary: List all products
+      description: |
+        Returns every product, sorted by `createdAt` descending.
+        Each product's `imageUrl` is a **signed S3 URL** valid for 1 hour.
+      operationId: getProducts
       responses:
         "200":
-          description: Products retrieved successfully
+          description: Products retrieved
           content:
             application/json:
               schema:
@@ -32,65 +60,48 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Product"
+              example:
+                data:
+                  - productId: P1788767406608
+                    name: Buldak Ramen
+                    categoryId: CAT1788767400000
+                    description: Korean spicy instant noodles
+                    price: 627
+                    currency: GBP
+                    imageUrl: https://smartretailx-products.s3.ap-south-1.amazonaws.com/products/1788767406608/1788767406608.jpg?X-Amz-Algorithm=...
+                    status: ACTIVE
+                    createdAt: "2026-09-21T10:00:00.000Z"
+                    updatedAt: "2026-09-21T10:00:00.000Z"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
     post:
       tags: [Products]
-      summary: Create a new product with an optional image
+      summary: Create a new product
       description: |
-        Creates a product and publishes a `ProductCreated` event.
-        If `initialStock` is provided, the inventory service will automatically create an inventory record for this product in the specified warehouse (default: `WH01`).
+        Creates a product and, on success, publishes a `ProductCreated` event
+        with retry (3 attempts, exponential backoff). Downstream, the
+        inventory-service will create a stock record if `initialStock > 0`.
+
+        **Content type:** `multipart/form-data`. The `image` field is optional;
+        if omitted, `imageUrl` will be `null`.
+
+        **Note on `currency`:** the service defaults to `LKR` if not provided.
+        Clients should send an explicit value (e.g. `GBP`) if a different
+        currency is desired.
+      operationId: createProduct
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
-              type: object
-              required:
-                - name
-                - categoryId
-                - description
-                - price
-              properties:
-                name:
-                  type: string
-                  example: Organic Milk
-                categoryId:
-                  type: string
-                  example: CAT001
-                description:
-                  type: string
-                  example: 1 litre organic whole milk
-                price:
-                  type: number
-                  format: double
-                  minimum: 0
-                  example: 2.99
-                currency:
-                  type: string
-                  default: GBP
-                  example: GBP
-                status:
-                  type: string
-                  enum: [ACTIVE, INACTIVE]
-                  default: ACTIVE
-                image:
-                  type: string
-                  format: binary
-                  description: Product image file (jpeg, png, gif, webp)
-                initialStock:
-                  type: integer
-                  minimum: 0
-                  default: 0
-                  description: Initial stock quantity to reserve for this product. If provided, inventory is automatically created.
-                  example: 50
-                warehouseId:
-                  type: string
-                  default: "WH01"
-                  description: Warehouse where the product will be stocked. Defaults to WH01.
-                  example: WH01
+              $ref: "#/components/schemas/CreateProductRequest"
+            encoding:
+              image:
+                contentType: image/jpeg, image/png, image/webp, image/gif
       responses:
         "201":
-          description: Product created successfully (inventory record will be created asynchronously)
+          description: Product created and `ProductCreated` published
           content:
             application/json:
               schema:
@@ -99,25 +110,43 @@ paths:
                   data:
                     $ref: "#/components/schemas/Product"
         "400":
-          description: Invalid request
+          description: |
+            Validation failed — missing required fields, unknown category,
+            negative price, or invalid status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingFields:
+                  value: { error: "name, categoryId, description and price are required" }
+                unknownCategory:
+                  value: { error: "Category does not exist" }
+                badPrice:
+                  value: { error: "price must be a non-negative number" }
+                badStatus:
+                  value: { error: "status must be ACTIVE or INACTIVE" }
         "409":
-          description: Product name already exists
+          description: A product with this name already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: A product with this name already exists
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/products/{productId}:
-    parameters:
-      - name: productId
-        in: path
-        required: true
-        schema:
-          type: string
-        example: P001
-
     get:
       tags: [Products]
-      summary: Get product by ID
+      summary: Get a product by ID
+      operationId: getProductById
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
       responses:
         "200":
-          description: Product retrieved successfully
+          description: Product retrieved
           content:
             application/json:
               schema:
@@ -126,48 +155,40 @@ paths:
                   data:
                     $ref: "#/components/schemas/Product"
         "404":
-          description: Product not found
+          $ref: "#/components/responses/ProductNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
     put:
       tags: [Products]
-      summary: Update product details – optionally replace or remove the image
+      summary: Update a product
+      description: |
+        Partial update — send only the fields you want to change.
+
+        **Image replacement logic:**
+        - If a new `image` file is uploaded, the old S3 object is deleted and
+          the new one becomes the product's image.
+        - If `removeImage=true` is sent, the image is deleted and `imageUrl`
+          becomes `null`.
+        - If neither is sent, the existing image is preserved.
+
+        **Content type:** `multipart/form-data` (even for text-only updates,
+        because multer is mounted as middleware).
+      operationId: updateProduct
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
-              type: object
-              properties:
-                name:
-                  type: string
-                  description: New product name
-                categoryId:
-                  type: string
-                description:
-                  type: string
-                price:
-                  type: number
-                  format: double
-                  minimum: 0
-                currency:
-                  type: string
-                status:
-                  type: string
-                  enum: [ACTIVE, INACTIVE]
-                image:
-                  type: string
-                  format: binary
-                  description: New image file – if provided, replaces the old one
-                removeImage:
-                  type: boolean
-                  description: Set to `true` to delete the current image without replacing it.
-                  default: false
-          application/json:
-            schema:
               $ref: "#/components/schemas/UpdateProductRequest"
+            encoding:
+              image:
+                contentType: image/jpeg, image/png, image/webp, image/gif
       responses:
         "200":
-          description: Product updated successfully
+          description: Product updated
           content:
             application/json:
               schema:
@@ -176,63 +197,310 @@ paths:
                   data:
                     $ref: "#/components/schemas/Product"
         "400":
-          description: Invalid request
+          description: |
+            Invalid field value or no fields provided.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                emptyString:
+                  value: { error: "name must be a non-empty string" }
+                noFields:
+                  value: { error: "No valid fields provided for update" }
         "404":
-          description: Product not found
+          $ref: "#/components/responses/ProductNotFound"
+        "409":
+          description: A different product already uses the requested name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: A product with this name already exists
+        "500":
+          $ref: "#/components/responses/InternalError"
 
     delete:
       tags: [Products]
-      summary: Delete a product (also removes image from S3)
+      summary: Delete a product
+      description: |
+        Deletes the product and, if it had an image, removes the S3 object.
+        S3 deletion failures are logged but do not block the product deletion.
+      operationId: deleteProduct
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
       responses:
         "204":
-          description: Product deleted successfully
+          description: Product deleted (no body)
         "404":
-          description: Product not found
+          $ref: "#/components/responses/ProductNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
+  # ---------------------------------------------------------------------------
+  # Categories
+  # ---------------------------------------------------------------------------
+
+  /api/v1/categories:
+    get:
+      tags: [Categories]
+      summary: List all categories
+      operationId: getCategories
+      responses:
+        "200":
+          description: Categories retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Category"
+              example:
+                data:
+                  - categoryId: CAT1788767400000
+                    name: Beverages
+                    description: Soft drinks, juices and water
+                    createdAt: "2026-09-20T10:00:00.000Z"
+                    updatedAt: "2026-09-20T10:00:00.000Z"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      tags: [Categories]
+      summary: Create a new category
+      operationId: createCategory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCategoryRequest"
+            example:
+              name: Beverages
+              description: Soft drinks, juices and water
+      responses:
+        "201":
+          description: Category created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Category"
+        "400":
+          description: name is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: name is required
+        "409":
+          description: Category with this name already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: Category with this name already exists
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/categories/{categoryId}:
+    get:
+      tags: [Categories]
+      summary: Get a category by ID
+      operationId: getCategoryById
+      parameters:
+        - $ref: "#/components/parameters/CategoryId"
+      responses:
+        "200":
+          description: Category retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Category"
+        "404":
+          $ref: "#/components/responses/CategoryNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    put:
+      tags: [Categories]
+      summary: Update a category
+      description: |
+        Partial update — send only the fields you want to change. At least
+        one field must be present.
+      operationId: updateCategory
+      parameters:
+        - $ref: "#/components/parameters/CategoryId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCategoryRequest"
+            example:
+              description: Cold and hot beverages
+      responses:
+        "200":
+          description: Category updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Category"
+        "400":
+          description: Invalid field value or no fields provided
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                empty:
+                  value: { error: "name must be a non-empty string" }
+                noFields:
+                  value: { error: "No fields to update" }
+        "404":
+          $ref: "#/components/responses/CategoryNotFound"
+        "409":
+          description: Another category already uses this name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: Category with this name already exists
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      tags: [Categories]
+      summary: Delete a category
+      description: |
+        Refuses to delete a category that is still referenced by one or more
+        products (returns `409`).
+      operationId: deleteCategory
+      parameters:
+        - $ref: "#/components/parameters/CategoryId"
+      responses:
+        "204":
+          description: Category deleted (no body)
+        "404":
+          $ref: "#/components/responses/CategoryNotFound"
+        "409":
+          description: Cannot delete — category is used by one or more products
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: Cannot delete category because it is used by one or more products
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# -----------------------------------------------------------------------------
+# Reusable components
+# -----------------------------------------------------------------------------
 components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
+
+  parameters:
+
+    ProductId:
+      name: productId
+      in: path
+      required: true
+      description: Product identifier
+      schema:
+        type: string
+      example: P1788767406608
+
+    CategoryId:
+      name: categoryId
+      in: path
+      required: true
+      description: Category identifier
+      schema:
+        type: string
+      example: CAT1788767400000
+
+  responses:
+
+    ProductNotFound:
+      description: Product not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: Product not found
+
+    CategoryNotFound:
+      description: Category not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: Category not found
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: Internal server error
 
   schemas:
+
+    # -------------------------------------------------------------------------
+    # Response objects
+    # -------------------------------------------------------------------------
+
     Product:
       type: object
-      required:
-        - productId
-        - name
-        - categoryId
-        - description
-        - price
-        - currency
-        - status
+      description: |
+        A product in the catalogue. `imageUrl` is a signed S3 URL valid for
+        1 hour; if the product has no image, `imageUrl` is `null`.
       properties:
         productId:
           type: string
-          example: P001
+          example: P1788767406608
         name:
           type: string
-          example: Organic Milk
+          example: Buldak Ramen
         categoryId:
           type: string
-          example: CAT001
+          example: CAT1788767400000
         description:
           type: string
-          example: 1 litre organic whole milk
+          example: Korean spicy instant noodles
         price:
           type: number
           format: double
           minimum: 0
-          example: 2.99
+          example: 627
         currency:
           type: string
+          description: ISO 4217 currency code
           example: GBP
         imageUrl:
           type: string
           nullable: true
-          description: Signed S3 URL (or S3 key if not enriched)
-          example: https://s3..../products/P001/123456.jpg?...
+          description: Signed S3 URL (or `null` if no image uploaded)
+          example: https://smartretailx-products.s3.ap-south-1.amazonaws.com/products/...
         status:
           type: string
           enum: [ACTIVE, INACTIVE]
@@ -244,21 +512,152 @@ components:
           type: string
           format: date-time
 
-    UpdateProductRequest:
+    Category:
       type: object
+      description: A product category.
+      properties:
+        categoryId:
+          type: string
+          example: CAT1788767400000
+        name:
+          type: string
+          example: Beverages
+        description:
+          type: string
+          example: Soft drinks, juices and water
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    # -------------------------------------------------------------------------
+    # Request bodies
+    # -------------------------------------------------------------------------
+
+    CreateProductRequest:
+      type: object
+      required:
+        - name
+        - categoryId
+        - description
+        - price
       properties:
         name:
           type: string
+          example: Buldak Ramen
         categoryId:
           type: string
+          example: CAT1788767400000
         description:
           type: string
+          example: Korean spicy instant noodles
+        price:
+          type: number
+          format: double
+          minimum: 0
+          example: 627
+        currency:
+          type: string
+          default: LKR
+          description: |
+            ISO 4217 currency code. **Defaults to `LKR`** if not provided —
+            clients should send an explicit value.
+          example: GBP
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE]
+          default: ACTIVE
+        image:
+          type: string
+          format: binary
+          description: Optional product image file
+        initialStock:
+          type: integer
+          minimum: 0
+          default: 0
+          description: |
+            Initial stock quantity. If greater than 0, the inventory-service
+            will create a stock record after the `ProductCreated` event.
+          example: 50
+        warehouseId:
+          type: string
+          description: |
+            Warehouse to stock the product in. If omitted, the
+            inventory-service picks the first active warehouse.
+          example: WH01
+
+    UpdateProductRequest:
+      type: object
+      description: |
+        Partial update. All fields are optional. If no fields are provided,
+        the API returns `400 No valid fields provided for update`.
+      properties:
+        name:
+          type: string
+          minLength: 1
+        categoryId:
+          type: string
+          minLength: 1
+        description:
+          type: string
+          minLength: 1
         price:
           type: number
           format: double
           minimum: 0
         currency:
           type: string
+          minLength: 1
         status:
           type: string
           enum: [ACTIVE, INACTIVE]
+        image:
+          type: string
+          format: binary
+          description: New image; if sent, replaces the old image
+        removeImage:
+          type: string
+          description: |
+            Set to `"true"` or `"1"` to delete the current image without
+            replacing it. (Multipart form fields arrive as strings.)
+          example: "true"
+
+    CreateCategoryRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          example: Beverages
+        description:
+          type: string
+          example: Soft drinks, juices and water
+
+    UpdateCategoryRequest:
+      type: object
+      description: |
+        Partial update. At least one of `name` or `description` must be
+        present, otherwise the API returns `400 No fields to update`.
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+
+    # -------------------------------------------------------------------------
+    # Error
+    # -------------------------------------------------------------------------
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          example: Product not found

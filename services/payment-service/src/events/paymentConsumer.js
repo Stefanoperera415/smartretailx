@@ -8,7 +8,14 @@ const {
 
 const { publishEvent } = require("../config/eventbridge");
 const { hasProcessed, markProcessed } = require("../repositories/processedEventRepository");
-const { processPayment } = require("../services/stripe"); // new service
+const { processPayment } = require("../services/stripe");
+
+// ----------------------------------------------------------------------
+// ✅ Determine if Stripe is enabled (real payment mode)
+//    When true, the consumer will NOT process payments automatically.
+//    The frontend will handle the payment flow.
+// ----------------------------------------------------------------------
+const USE_STRIPE = process.env.USE_STRIPE === "true" && process.env.STRIPE_SECRET_KEY;
 
 const sqs = new SQSClient({
   region: process.env.AWS_REGION || "ap-south-1",
@@ -70,7 +77,6 @@ async function processMessage(message) {
     console.log("Raw EventBridge event:", JSON.stringify(rawEvent, null, 2));
 
     // 2) Extract the actual event from the EventBridge envelope
-    //    EventBridge puts your custom event inside the "detail" field.
     const detail = rawEvent.detail;
     if (!detail) {
       throw new Error("EventBridge message missing 'detail' field");
@@ -107,6 +113,23 @@ async function processMessage(message) {
       throw new Error("InventoryReserved event missing required payment data");
     }
 
+    // ------------------------------------------------------------------
+    // ✅ NEW: If Stripe is enabled, DO NOT process payment automatically.
+    //    The frontend will handle the payment flow.
+    // ------------------------------------------------------------------
+    if (USE_STRIPE) {
+      console.log(`Stripe mode enabled – skipping automatic payment for order ${order.orderId}`);
+      // We don't mark as processed – we simply delete the message.
+      // The frontend will later call /confirm-payment and publish PaymentCompleted.
+      await deleteMessage(message);
+      console.log("Payment SQS message deleted (handled by frontend)");
+      console.log("----------------------------------------");
+      return;
+    }
+
+    // ------------------------------------------------------------------
+    // MOCK MODE: Process payment automatically (legacy flow)
+    // ------------------------------------------------------------------
     const amount = Number(order.totalAmount);
     const currency = order.currency || "GBP";
 
@@ -131,7 +154,7 @@ async function processMessage(message) {
         currency,
         items: order.items || [],
         warehouseId: order.warehouseId || "WH01",
-        transactionRef: paymentResult.transactionRef, // Stripe payment intent ID
+        transactionRef: paymentResult.transactionRef,
       });
       console.log(`PaymentCompleted published for ${order.orderId}`);
     } else {
@@ -143,7 +166,7 @@ async function processMessage(message) {
         items: order.items || [],
         warehouseId: order.warehouseId || "WH01",
         reason: paymentResult.reason || "Payment failed",
-        transactionRef: paymentResult.transactionRef, // might be null
+        transactionRef: paymentResult.transactionRef,
       });
       console.log(`PaymentFailed published for ${order.orderId}`);
     }

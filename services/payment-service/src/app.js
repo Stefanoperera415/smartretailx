@@ -32,8 +32,8 @@ app.use((err, req, res, next) => {
 });
 
 async function startServer() {
-  await connectDatabase();          // creates tables if missing
-  await startPaymentConsumer();     // only ONE call now
+  await connectDatabase();          
+  await startPaymentConsumer();     
   app.listen(PORT, () => console.log(`Payment service running on port ${PORT}`));
 }
 

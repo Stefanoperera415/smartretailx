@@ -26,7 +26,6 @@ async function findAll(filters = {}) {
     );
   } else {
     result = await dynamoDB.send(new ScanCommand({ TableName: NOTIFICATIONS_TABLE }));
-    // Sort manually (DynamoDB Scan doesn't guarantee order)
     result.Items = (result.Items || []).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   }
   return result.Items || [];
@@ -43,7 +42,6 @@ async function findById(notificationId) {
 }
 
 async function findOneByEventId(eventId) {
-  // Since we don't have a GSI on eventId, we scan (or we could add a GSI)
   const result = await dynamoDB.send(
     new ScanCommand({
       TableName: NOTIFICATIONS_TABLE,
@@ -71,19 +69,31 @@ async function create(notification) {
   return item;
 }
 
+/**
+ * Update notification status and optional additional fields (e.g., readAt, sentAt).
+ * ✅ FIXED: Properly builds UpdateExpression dynamically.
+ */
 async function updateStatus(notificationId, status, additionalFields = {}) {
-  const updateExpression = "SET #status = :status, updatedAt = :updatedAt";
-  const expressionAttributeNames = { "#status": "status" };
-  const expressionAttributeValues = {
-    ":status": status,
-    ":updatedAt": new Date().toISOString(),
-  };
-  // Add optional fields
+  // Start with mandatory fields: status and updatedAt
+  const updateParts = [];
+  const expressionAttributeNames = {};
+  const expressionAttributeValues = {};
+
+  // Add status
+  updateParts.push("#status = :status");
+  expressionAttributeNames["#status"] = "status";
+  expressionAttributeValues[":status"] = status;
+
+  // Add updatedAt
+  updateParts.push("updatedAt = :updatedAt");
+  expressionAttributeValues[":updatedAt"] = new Date().toISOString();
+
+  // Add additional fields
   for (const [key, value] of Object.entries(additionalFields)) {
-    const fieldKey = `#${key}`;
+    const nameKey = `#${key}`;
     const valueKey = `:${key}`;
-    updateExpression.push(`${fieldKey} = ${valueKey}`);
-    expressionAttributeNames[fieldKey] = key;
+    updateParts.push(`${nameKey} = ${valueKey}`);
+    expressionAttributeNames[nameKey] = key;
     expressionAttributeValues[valueKey] = value;
   }
 
@@ -91,13 +101,9 @@ async function updateStatus(notificationId, status, additionalFields = {}) {
     new UpdateCommand({
       TableName: NOTIFICATIONS_TABLE,
       Key: { notificationId },
-      UpdateExpression: `SET ${Object.keys(additionalFields).map(k => `#${k} = :${k}`).join(", ")}, updatedAt = :updatedAt`,
-      ExpressionAttributeNames: { "#status": "status", ...Object.fromEntries(Object.keys(additionalFields).map(k => [`#${k}`, k])) },
-      ExpressionAttributeValues: {
-        ":status": status,
-        ":updatedAt": new Date().toISOString(),
-        ...Object.fromEntries(Object.entries(additionalFields).map(([k, v]) => [`:${k}`, v])),
-      },
+      UpdateExpression: `SET ${updateParts.join(", ")}`,
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: expressionAttributeValues,
       ReturnValues: "ALL_NEW",
     })
   );

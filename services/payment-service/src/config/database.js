@@ -3,7 +3,7 @@ require("dotenv").config();
 const { Pool } = require("pg");
 const { Signer } = require("@aws-sdk/rds-signer");
 
-// Retry helper (copied from order-service)
+// Retry helper
 async function withRetry(fn, maxAttempts = 5, delay = 1000) {
   let lastError;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -86,6 +86,7 @@ async function connectDatabase() {
 }
 
 async function initializeDatabase() {
+  // Create tables if they don't exist
   await pool.query(`
     CREATE TABLE IF NOT EXISTS payments (
       payment_id VARCHAR(50) PRIMARY KEY,
@@ -108,7 +109,10 @@ async function initializeDatabase() {
       event_type VARCHAR(100) NOT NULL,
       processed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
+  `);
 
+  // Create the function (idempotent)
+  await pool.query(`
     CREATE OR REPLACE FUNCTION update_updated_at_column()
     RETURNS TRIGGER AS $$
     BEGIN
@@ -116,12 +120,23 @@ async function initializeDatabase() {
       RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
+  `);
 
-    DROP TRIGGER IF EXISTS update_payments_updated_at ON payments;
-    CREATE TRIGGER update_payments_updated_at
-      BEFORE UPDATE ON payments
-      FOR EACH ROW
-      EXECUTE FUNCTION update_updated_at_column();
+  // Create the trigger only if it does not exist
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'update_payments_updated_at'
+      ) THEN
+        CREATE TRIGGER update_payments_updated_at
+          BEFORE UPDATE ON payments
+          FOR EACH ROW
+          EXECUTE FUNCTION update_updated_at_column();
+      END IF;
+    END
+    $$;
   `);
 
   console.log("Payment database schema verified (tables created if missing).");

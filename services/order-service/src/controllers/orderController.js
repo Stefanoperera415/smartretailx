@@ -1,11 +1,6 @@
 const orderRepository = require("../repositories/orderRepository");
-const {
-  getUser,
-  getProduct
-} = require("../clients/serviceClient");
-const {
-  publishEvent
-} = require("../events/eventPublisher");
+const { getUser, getProduct } = require("../clients/serviceClient");
+const { publishEvent } = require("../config/eventbridge");
 
 const VALID_STATUSES = [
   "PENDING",
@@ -14,7 +9,7 @@ const VALID_STATUSES = [
   "SHIPPED",
   "DELIVERED",
   "CANCELLED",
-  "PAYMENT_FAILED"
+  "PAYMENT_FAILED",
 ];
 
 async function getOrders(req, res, next) {
@@ -53,20 +48,14 @@ async function getOrdersByCustomer(req, res, next) {
 
 async function createOrder(req, res) {
   try {
-    // =====================================================
-    // 1. EXTRACT FIELDS, INCLUDING WAREHOUSE ID
-    // =====================================================
     const {
       customerId,
       items,
       shippingAddress,
       currency = "GBP",
-      warehouseId  // 👈 extract warehouseId from request
+      warehouseId,
     } = req.body;
 
-    // =====================================================
-    // 2. BASIC VALIDATION
-    // =====================================================
     if (!customerId) {
       return res.status(400).json({ error: "customerId is required" });
     }
@@ -77,28 +66,21 @@ async function createOrder(req, res) {
       return res.status(400).json({ error: "shippingAddress is required" });
     }
 
-    // =====================================================
-    // 3. CUSTOMER AUTHORIZATION
-    // =====================================================
     if (req.user.role === "CUSTOMER" && req.user.id !== customerId) {
       return res.status(403).json({ error: "You can only create orders for yourself" });
     }
 
-    // =====================================================
-    // 4. VERIFY CUSTOMER
-    // =====================================================
     const customer = await getUser(customerId, req.headers.authorization);
     if (!customer) {
       return res.status(400).json({ error: "Customer does not exist" });
     }
 
-    // =====================================================
-    // 5. VALIDATE PRODUCTS AND GET PRICES
-    // =====================================================
     const orderItems = [];
     for (const item of items) {
       if (!item.productId || !Number.isInteger(item.quantity) || item.quantity <= 0) {
-        return res.status(400).json({ error: "Each item requires a valid productId and positive integer quantity" });
+        return res.status(400).json({
+          error: "Each item requires a valid productId and positive integer quantity",
+        });
       }
       const product = await getProduct(item.productId);
       if (!product) {
@@ -108,21 +90,16 @@ async function createOrder(req, res) {
       const subtotal = Number((unitPrice * item.quantity).toFixed(2));
       orderItems.push({
         productId: product.productId,
+        productName: product.name, // ✅ NEW — captured for notifications
         quantity: item.quantity,
         unitPrice,
-        subtotal
+        subtotal,
       });
     }
 
-    // =====================================================
-    // 6. CALCULATE TOTAL
-    // =====================================================
-    const totalAmount = Number(orderItems.reduce((total, item) => total + item.subtotal, 0).toFixed(2));
-
-    // =====================================================
-    // 7. CREATE ORDER (with warehouseId)
-    // =====================================================
-    const finalWarehouseId = warehouseId || "WH01"; // default if not provided
+    const totalAmount = Number(
+      orderItems.reduce((total, item) => total + item.subtotal, 0).toFixed(2)
+    );
 
     const order = {
       orderId: `ORD${Date.now()}`,
@@ -132,27 +109,24 @@ async function createOrder(req, res) {
       currency,
       shippingAddress,
       items: orderItems,
-     
-      createdAt: new Date().toISOString()
     };
 
     const createdOrder = await orderRepository.create(order);
 
-    // =====================================================
-    // 8. PUBLISH ORDER CREATED EVENT (with warehouseId)
-    // =====================================================
-    await publishEvent("OrderCreated", {
+    const eventPayload = {
       orderId: createdOrder.orderId,
       customerId: createdOrder.customerId,
       totalAmount: createdOrder.totalAmount,
       currency: createdOrder.currency,
-      items: createdOrder.items,
-      warehouseId: createdOrder.warehouseId   // 👈 pass the warehouseId
-    });
+      items: createdOrder.items, // ✅ already contains productName
+    };
 
-    // =====================================================
-    // 9. RETURN CREATED ORDER
-    // =====================================================
+    if (warehouseId) {
+      eventPayload.warehouseId = warehouseId;
+    }
+
+    await publishEvent("OrderCreated", eventPayload);
+
     return res.status(201).json({ data: createdOrder });
   } catch (error) {
     console.error("Create order error:", error);
@@ -166,7 +140,9 @@ async function updateOrderStatus(req, res, next) {
     return res.status(400).json({ error: "status is required" });
   }
   if (!VALID_STATUSES.includes(status)) {
-    return res.status(400).json({ error: `Invalid status. Allowed values: ${VALID_STATUSES.join(", ")}` });
+    return res.status(400).json({
+      error: `Invalid status. Allowed values: ${VALID_STATUSES.join(", ")}`,
+    });
   }
   try {
     const order = await orderRepository.findById(req.params.orderId);
@@ -188,5 +164,5 @@ module.exports = {
   getOrderById,
   getOrdersByCustomer,
   createOrder,
-  updateOrderStatus
+  updateOrderStatus,
 };

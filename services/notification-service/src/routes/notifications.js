@@ -5,36 +5,20 @@ const {
   getNotificationById,
   createNotification,
   markAsRead,
-  sendNotification
-} = require(
-  "../controllers/notificationController"
-);
+  sendNotification,
+  streamNotifications,          // ← THIS was missing
+} = require("../controllers/notificationController");
 
 const router = express.Router();
 
-router.get(
-  "/",
-  getNotifications
-);
+router.get("/", getNotifications);
+router.post("/", createNotification);
 
-router.post(
-  "/",
-  createNotification
-);
+// ✅ SSE stream MUST come before /:notificationId to avoid being shadowed
+router.get("/stream", streamNotifications);
 
-router.get(
-  "/:notificationId",
-  getNotificationById
-);
-
-router.patch(
-  "/:notificationId/read",
-  markAsRead
-);
-
-router.post(
-  "/:notificationId/send",
-  sendNotification
-);
+router.get("/:notificationId", getNotificationById);
+router.patch("/:notificationId/read", markAsRead);
+router.post("/:notificationId/send", sendNotification);
 
 module.exports = router;

@@ -4,6 +4,7 @@ const { DynamoDBDocumentClient } = require("@aws-sdk/lib-dynamodb");
 const AWS_REGION = process.env.AWS_REGION || "ap-south-1";
 const INVENTORY_TABLE = process.env.DYNAMODB_INVENTORY_TABLE;
 const PROCESSED_EVENTS_TABLE = process.env.DYNAMODB_PROCESSED_EVENTS_TABLE;
+const WAREHOUSE_TABLE = process.env.DYNAMODB_WAREHOUSE_TABLE || "smartretailx-warehouse"; // ✅ default
 
 if (!INVENTORY_TABLE || !PROCESSED_EVENTS_TABLE) {
   throw new Error("DYNAMODB_INVENTORY_TABLE and DYNAMODB_PROCESSED_EVENTS_TABLE must be defined");
@@ -29,7 +30,6 @@ async function ensureTable(tableName, keySchema, attributeDefinitions, billingMo
           BillingMode: billingMode,
         })
       );
-      // Wait for table to become active
       let tableActive = false;
       while (!tableActive) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -45,8 +45,8 @@ async function ensureTable(tableName, keySchema, attributeDefinitions, billingMo
 
 async function connectDatabase() {
   try {
-    // Inventory table: partition key = productId, sort key = warehouseId
-    await ensureTable(INVENTORY_TABLE, 
+    // Inventory table
+    await ensureTable(INVENTORY_TABLE,
       [
         { AttributeName: "productId", KeyType: "HASH" },
         { AttributeName: "warehouseId", KeyType: "RANGE" },
@@ -57,19 +57,32 @@ async function connectDatabase() {
       ]
     );
 
-    // Processed events table: partition key = eventId
+    // Processed events table
     await ensureTable(PROCESSED_EVENTS_TABLE,
       [{ AttributeName: "eventId", KeyType: "HASH" }],
       [{ AttributeName: "eventId", AttributeType: "S" }]
     );
 
+    // ✅ Warehouse table – will be created if missing
+    await ensureTable(WAREHOUSE_TABLE,
+      [{ AttributeName: "warehouseId", KeyType: "HASH" }],
+      [{ AttributeName: "warehouseId", AttributeType: "S" }]
+    );
+
     console.log("Connected to DynamoDB");
     console.log("Inventory table:", INVENTORY_TABLE);
     console.log("Processed events table:", PROCESSED_EVENTS_TABLE);
+    console.log("Warehouse table:", WAREHOUSE_TABLE);
   } catch (error) {
     console.error("DynamoDB connection failed:", error);
     process.exit(1);
   }
 }
 
-module.exports = { dynamoDB, connectDatabase, INVENTORY_TABLE, PROCESSED_EVENTS_TABLE };
+module.exports = {
+  dynamoDB,
+  connectDatabase,
+  INVENTORY_TABLE,
+  PROCESSED_EVENTS_TABLE,
+  WAREHOUSE_TABLE, // ✅ export so other files can use it
+};

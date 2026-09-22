@@ -1,35 +1,22 @@
 const express = require("express");
-
 const {
   getPayments,
   getPaymentById,
   getPaymentsByOrder,
-  createPayment,
-  refundPayment
+  refundPayment,
+  createPaymentIntent,
+  confirmPayment,
 } = require("../controllers/paymentController");
 
 const router = express.Router();
 
 router.get("/", getPayments);
+router.get("/order/:orderId", getPaymentsByOrder);
+router.get("/:paymentId", getPaymentById);
 
-router.get(
-  "/order/:orderId",
-  getPaymentsByOrder
-);
+router.post("/create-payment-intent", createPaymentIntent);
+router.post("/confirm-payment", confirmPayment);
 
-router.get(
-  "/:paymentId",
-  getPaymentById
-);
-
-router.post(
-  "/",
-  createPayment
-);
-
-router.post(
-  "/:paymentId/refund",
-  refundPayment
-);
+router.post("/:paymentId/refund", refundPayment);
 
 module.exports = router;
