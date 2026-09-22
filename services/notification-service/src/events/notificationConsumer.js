@@ -16,7 +16,7 @@ const { getUserEmail } = require("../clients/userServiceClient");
 
 // ==========================================
 // Helpers
-// ==========================================
+// =====================c=====================
 function buildProductSummary(items = []) {
   const names = items
     .map((i) => i.productName || i.name)
