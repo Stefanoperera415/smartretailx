@@ -1,6 +1,12 @@
 import http from "k6/http";
 import { sleep } from "k6";
-import { BASE, AUTH_HEADERS, TEST_PRODUCT_ID, TEST_CUSTOMER_ID } from "./common.js";
+import {
+  BASE,
+  AUTH_HEADERS,
+  TEST_PRODUCT_ID,
+  TEST_CUSTOMER_ID,
+  validateSetup,
+} from "./common.js";
 
 export const options = {
   stages: [
@@ -8,8 +14,12 @@ export const options = {
     { duration: "40s", target: 30 },
     { duration: "10s", target: 0  },
   ],
-  thresholds: {},   // no thresholds during diagnosis
+  thresholds: {},   // observational
 };
+
+export function setup() {
+  return validateSetup();
+}
 
 const errorLog = {};
 
@@ -22,7 +32,9 @@ export default function () {
     res = http.get(`${BASE.product}/api/v1/products`, { tags: { name: tag } });
   } else if (rand < 0.8) {
     tag = "get-product";
-    res = http.get(`${BASE.product}/api/v1/products/${TEST_PRODUCT_ID}`, { tags: { name: tag } });
+    res = http.get(`${BASE.product}/api/v1/products/${TEST_PRODUCT_ID}`, {
+      tags: { name: tag },
+    });
   } else {
     tag = "customer-orders";
     res = http.get(

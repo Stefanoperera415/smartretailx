@@ -1,5 +1,11 @@
 const { dynamoDB } = require("../config/database");
-const { GetCommand, PutCommand, ScanCommand } = require("@aws-sdk/lib-dynamodb");
+const {
+  GetCommand,
+  PutCommand,
+  ScanCommand,
+  UpdateCommand, // ✅ ADDED — used in update(), was missing
+  DeleteCommand, // ✅ ADDED — used in remove(), caused ReferenceError at line 73
+} = require("@aws-sdk/lib-dynamodb");
 
 const CATEGORY_TABLE = process.env.DYNAMODB_CATEGORY_TABLE;
 if (!CATEGORY_TABLE) throw new Error("DYNAMODB_CATEGORY_TABLE is not defined");

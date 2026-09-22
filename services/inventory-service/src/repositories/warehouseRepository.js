@@ -1,5 +1,11 @@
 const { dynamoDB } = require("../config/database");
-const { GetCommand, PutCommand, UpdateCommand, ScanCommand } = require("@aws-sdk/lib-dynamodb");
+const {
+  GetCommand,
+  PutCommand,
+  UpdateCommand,
+  ScanCommand,
+  DeleteCommand, // ✅ ADDED — was missing, caused ReferenceError at line 78
+} = require("@aws-sdk/lib-dynamodb");
 
 const WAREHOUSE_TABLE = process.env.DYNAMODB_WAREHOUSE_TABLE;
 if (!WAREHOUSE_TABLE) throw new Error("DYNAMODB_WAREHOUSE_TABLE is not defined");
