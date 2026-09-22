@@ -7,23 +7,14 @@ const {
 } = require("@aws-sdk/client-sqs");
 const { publishEvent } = require("../config/eventbridge");
 const { reserveStock, releaseStock } = require("../service/inventoryService");
-const {
-  hasProcessed,
-  markProcessed,
-} = require("../service/idempotencyService");
+const { hasProcessed, markProcessed } = require("../service/idempotencyService");
 const inventoryRepo = require("../repositories/inventoryRepository");
 const warehouseRepo = require("../repositories/warehouseRepository");
 
 const sqs = new SQSClient({ region: process.env.AWS_REGION || "ap-south-1" });
-
 const INVENTORY_QUEUE_URL = process.env.INVENTORY_QUEUE_URL;
-if (!INVENTORY_QUEUE_URL) {
-  throw new Error("INVENTORY_QUEUE_URL is not defined");
-}
+if (!INVENTORY_QUEUE_URL) throw new Error("INVENTORY_QUEUE_URL is not defined");
 
-// ==========================================
-// Start SQS Consumer
-// ==========================================
 async function startInventoryConsumer() {
   console.log("========================================");
   console.log("Starting Inventory SQS consumer");
@@ -32,9 +23,6 @@ async function startInventoryConsumer() {
   pollMessages();
 }
 
-// ==========================================
-// Poll SQS (long polling)
-// ==========================================
 async function pollMessages() {
   while (true) {
     try {
@@ -45,12 +33,9 @@ async function pollMessages() {
         VisibilityTimeout: 30,
         MessageAttributeNames: ["All"],
       });
-
       const response = await sqs.send(command);
       const messages = response.Messages || [];
-
       if (messages.length === 0) continue;
-
       for (const message of messages) {
         await processMessage(message);
       }
@@ -61,21 +46,14 @@ async function pollMessages() {
   }
 }
 
-// ==========================================
-// Process Individual Message
-// ==========================================
 async function processMessage(message) {
   try {
     console.log("----------------------------------------");
     console.log("Received Inventory SQS message");
 
     const rawEvent = JSON.parse(message.Body);
-    console.log("Raw EventBridge event:", JSON.stringify(rawEvent, null, 2));
-
     const detail = rawEvent.detail;
-    if (!detail) {
-      throw new Error("EventBridge message missing 'detail' field");
-    }
+    if (!detail) throw new Error("EventBridge message missing 'detail' field");
 
     const eventType = detail.eventType || rawEvent["detail-type"];
     const eventId = detail.eventId;
@@ -83,8 +61,7 @@ async function processMessage(message) {
 
     if (!eventId) throw new Error("Event missing eventId");
     if (!eventType) throw new Error("Event missing eventType");
-    if (!data || typeof data !== "object")
-      throw new Error("Event missing data");
+    if (!data || typeof data !== "object") throw new Error("Event missing data");
 
     console.log("Event type:", eventType);
 
@@ -110,9 +87,6 @@ async function processMessage(message) {
   }
 }
 
-// ==========================================
-// Handle OrderCreated (unchanged)
-// ==========================================
 async function handleOrderCreated(order, eventId, eventType) {
   if (await hasProcessed(eventId)) {
     console.log(`Duplicate OrderCreated event ignored: ${eventId}`);
@@ -128,9 +102,7 @@ async function handleOrderCreated(order, eventId, eventType) {
 
   if (requestedWarehouseId) {
     const wh = await warehouseRepo.findById(requestedWarehouseId);
-    if (!wh) {
-      throw new Error(`Warehouse ${requestedWarehouseId} does not exist`);
-    }
+    if (!wh) throw new Error(`Warehouse ${requestedWarehouseId} does not exist`);
   }
 
   const warehouseMapping = {};
@@ -142,9 +114,7 @@ async function handleOrderCreated(order, eventId, eventType) {
     const quantity = Number(item.quantity);
 
     if (!productId || !Number.isInteger(quantity) || quantity <= 0) {
-      throw new Error(
-        `Invalid item: productId=${productId}, quantity=${item.quantity}`,
-      );
+      throw new Error(`Invalid item: productId=${productId}, quantity=${item.quantity}`);
     }
 
     const inventoryItems = await inventoryRepo.findByProductId(productId);
@@ -156,9 +126,7 @@ async function handleOrderCreated(order, eventId, eventType) {
     }
 
     if (requestedWarehouseId) {
-      const specific = suitable.filter(
-        (inv) => inv.warehouseId === requestedWarehouseId,
-      );
+      const specific = suitable.filter((inv) => inv.warehouseId === requestedWarehouseId);
       if (specific.length === 0) {
         failureReason = `Requested warehouse ${requestedWarehouseId} does not have enough stock for ${productId}`;
         break;
@@ -171,20 +139,12 @@ async function handleOrderCreated(order, eventId, eventType) {
     warehouseMapping[productId] = chosen.warehouseId;
 
     try {
-      const reserved = await inventoryRepo.reserveStock(
-        productId,
-        chosen.warehouseId,
-        quantity,
-      );
+      const reserved = await inventoryRepo.reserveStock(productId, chosen.warehouseId, quantity);
       if (!reserved) {
         failureReason = `Failed to reserve ${productId} in warehouse ${chosen.warehouseId}`;
         break;
       }
-      reservedItems.push({
-        productId,
-        quantity,
-        warehouseId: chosen.warehouseId,
-      });
+      reservedItems.push({ productId, quantity, warehouseId: chosen.warehouseId });
     } catch (error) {
       failureReason = `Error reserving ${productId}: ${error.message}`;
       break;
@@ -192,80 +152,111 @@ async function handleOrderCreated(order, eventId, eventType) {
   }
 
   if (failureReason) {
+    // Rollback — if this fails, escalate so the whole message retries.
+    const rollbackErrors = [];
     for (const item of reservedItems) {
       try {
-        await inventoryRepo.releaseStock(
-          item.productId,
-          item.warehouseId,
-          item.quantity,
-        );
+        await inventoryRepo.releaseStock(item.productId, item.warehouseId, item.quantity);
       } catch (releaseError) {
-        console.error(`Rollback failed for ${item.productId}:`, releaseError);
+        console.error(`Rollback failed for ${item.productId}:`, releaseError.message);
+        rollbackErrors.push(releaseError.message);
       }
     }
-    await publishEvent("InventoryReservationFailed", {
-      orderId: order.orderId,
-      customerId: order.customerId,
-      items: order.items,
-      reason: failureReason,
-    });
+
+    if (rollbackErrors.length > 0) {
+      // Escalate: leave the SQS message for redelivery.
+      throw new Error(
+        `Rollback failed for ${rollbackErrors.length} item(s): ${rollbackErrors.join("; ")}`
+      );
+    }
+
+    // Emit failure event with full warehouse mapping for downstream compensation.
+    await publishEvent(
+      "InventoryReservationFailed",
+      {
+        orderId: order.orderId,
+        customerId: order.customerId,
+        items: order.items,
+        reason: failureReason,
+      },
+      { eventId: `inv-fail-${order.orderId}` }
+    );
     console.log(`InventoryReservationFailed published for ${order.orderId}`);
   } else {
-    await publishEvent("InventoryReserved", {
-      orderId: order.orderId,
-      customerId: order.customerId,
-      totalAmount: Number(order.totalAmount),
-      currency: order.currency || "GBP",
-      items: order.items,
-      warehouseMapping: warehouseMapping,
-      warehouseId: Object.values(warehouseMapping)[0] || null,
-    });
+    // ✅ Carry warehouseMapping downstream so multi-warehouse compensations work.
+    const itemsWithWh = order.items.map((it) => ({
+      ...it,
+      warehouseId: warehouseMapping[it.productId] || null,
+    }));
+
+    await publishEvent(
+      "InventoryReserved",
+      {
+        orderId: order.orderId,
+        customerId: order.customerId,
+        totalAmount: Number(order.totalAmount),
+        currency: order.currency || "GBP",
+        items: itemsWithWh,
+        warehouseMapping,
+        warehouseId: Object.values(warehouseMapping)[0] || null,
+      },
+      { eventId: `inv-reserved-${order.orderId}` }
+    );
     console.log(`InventoryReserved published for ${order.orderId}`);
   }
 }
 
-// ==========================================
-// Handle ReleaseInventory
-// ==========================================
+/**
+ * Release reserved stock. Each item carries its own warehouseId so
+ * multi-warehouse orders compensate correctly.
+ * Treats "already released" as success (idempotent no-op).
+ */
 async function handleReleaseInventory(data, eventId, eventType) {
   if (await hasProcessed(eventId)) {
     console.log(`Duplicate ReleaseInventory event ignored: ${eventId}`);
     return;
   }
 
-  const { orderId, items, warehouseId } = data;
+  const { orderId, items, warehouseId: fallbackWh } = data;
   if (!orderId || !Array.isArray(items) || items.length === 0) {
     throw new Error("ReleaseInventory event missing orderId or items");
   }
 
-  const whId = warehouseId || "WH01";
-  const wh = await warehouseRepo.findById(whId);
-  if (!wh) {
-    throw new Error(`Warehouse ${whId} does not exist`);
-  }
+  const fallbackWhId = fallbackWh || "WH01";
 
   for (const item of items) {
     const productId = item.productId || item.product;
     const quantity = Number(item.quantity);
+    const whId = item.warehouseId || fallbackWhId;
+
     if (!productId || !Number.isInteger(quantity) || quantity <= 0) {
       throw new Error(`Invalid release item for order ${orderId}`);
     }
-    const released = await releaseStock(productId, whId, quantity);
-    if (!released) {
-      throw new Error(`Reserved inventory cannot be released for ${productId}`);
+
+    const wh = await warehouseRepo.findById(whId);
+    if (!wh) throw new Error(`Warehouse ${whId} does not exist`);
+
+    try {
+      await releaseStock(productId, whId, quantity);
+    } catch (err) {
+      // Treat "nothing to release" as a successful no-op (idempotent).
+      if (err.name === "ConditionalCheckFailedException" ||
+          /ConditionalCheckFailed/i.test(err.message || "")) {
+        console.warn(`releaseStock no-op for ${productId}/${whId} — already released`);
+        continue;
+      }
+      throw err;
     }
   }
 
-  await publishEvent("InventoryReleased", {
-    orderId,
-    warehouseId: whId,
-  });
+  await publishEvent(
+    "InventoryReleased",
+    { orderId, warehouseId: fallbackWhId },
+    { eventId: `inv-released-${orderId}` }
+  );
   console.log(`InventoryReleased published for ${orderId}`);
 }
 
-// ==========================================
-// Handle ProductCreated – smart warehouse fallback
-// ==========================================
 async function handleProductCreated(data, eventId, eventType) {
   if (await hasProcessed(eventId)) {
     console.log(`Duplicate ProductCreated event ignored: ${eventId}`);
@@ -273,21 +264,17 @@ async function handleProductCreated(data, eventId, eventType) {
   }
 
   const { productId, initialStock = 0, warehouseId } = data;
-  if (!productId) {
-    throw new Error("ProductCreated event missing productId");
-  }
+  if (!productId) throw new Error("ProductCreated event missing productId");
 
   let resolvedWarehouseId = warehouseId;
 
-  // If warehouseId is not provided or empty, pick the first active warehouse
   if (!resolvedWarehouseId) {
     const all = await warehouseRepo.findAll();
-    const active = all.filter(w => w.status === "ACTIVE");
+    const active = all.filter((w) => w.status === "ACTIVE");
     if (active.length > 0) {
       resolvedWarehouseId = active[0].warehouseId;
       console.log(`No warehouse provided; using first active warehouse: ${resolvedWarehouseId}`);
     } else {
-      // No active warehouse – create a default one
       const defaultId = "WH01";
       console.log(`No active warehouses found; creating default warehouse ${defaultId}`);
       await warehouseRepo.create({
@@ -299,7 +286,6 @@ async function handleProductCreated(data, eventId, eventType) {
       resolvedWarehouseId = defaultId;
     }
   } else {
-    // Validate that the warehouse exists; if not, create it
     let wh = await warehouseRepo.findById(resolvedWarehouseId);
     if (!wh) {
       console.log(`Warehouse ${resolvedWarehouseId} does not exist. Creating it now.`);
@@ -319,26 +305,17 @@ async function handleProductCreated(data, eventId, eventType) {
     }
   }
 
-  // Create inventory record
   await inventoryRepo.upsert(productId, resolvedWarehouseId, initialStock, 10);
-  console.log(
-    `Inventory created for product ${productId} in warehouse ${resolvedWarehouseId} with stock ${initialStock}`,
-  );
+  console.log(`Inventory created for ${productId} in ${resolvedWarehouseId} with stock ${initialStock}`);
 }
 
-// ==========================================
-// Delete SQS Message
-// ==========================================
 async function deleteMessage(message) {
-  const command = new DeleteMessageCommand({
+  await sqs.send(new DeleteMessageCommand({
     QueueUrl: INVENTORY_QUEUE_URL,
     ReceiptHandle: message.ReceiptHandle,
-  });
-  await sqs.send(command);
+  }));
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 module.exports = { startInventoryConsumer };

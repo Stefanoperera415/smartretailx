@@ -46,6 +46,19 @@ const COUNTRIES = [
   { code: "ZA", name: "South Africa" },
 ];
 
+/**
+ * Helper: shape cart items for payment-service.
+ * Includes productName so both the fast-path confirm-payment and the
+ * webhook fallback can produce product-named notifications.
+ */
+function buildPaymentItems(cartItems) {
+  return cartItems.map((item) => ({
+    productId: item.productId,
+    productName: item.name,
+    quantity: item.quantity,
+  }));
+}
+
 const CheckoutForm = ({
   clientSecret,
   orderId,
@@ -84,19 +97,13 @@ const CheckoutForm = ({
       if (error) {
         onError(error.message);
       } else if (paymentIntent.status === "succeeded") {
-        // ✅ Now includes productName so notification-service can render
-        //    "Your 'iPhone 15' will be delivered shortly."
         await paymentService.confirmPayment({
           paymentIntentId: paymentIntent.id,
           orderId,
           customerId,
           amount: cartTotal,
           currency: "GBP",
-          items: cartItems.map((item) => ({
-            productId: item.productId,
-            productName: item.name,       // ✅ NEW
-            quantity: item.quantity,
-          })),
+          items: buildPaymentItems(cartItems),
         });
         onSuccess(orderId);
       }
@@ -192,11 +199,16 @@ const CheckoutPage = () => {
       const order = orderRes.data.data;
       setOrderId(order.orderId);
 
+      // ✅ FIX: include `items` so backend can stage them for the
+      //    webhook fallback path. Without this, webhook-triggered
+      //    PaymentCompleted notifications would say "your order" instead
+      //    of naming the product.
       const paymentIntentRes = await paymentService.createPaymentIntent({
         orderId: order.orderId,
         customerId: user.id,
         amount: cartTotal,
         currency: "GBP",
+        items: buildPaymentItems(cartItems),
       });
       setClientSecret(paymentIntentRes.data.clientSecret);
     } catch (err) {

@@ -3,8 +3,12 @@ const cors = require("cors");
 require("dotenv").config();
 const swaggerUi = require("swagger-ui-express");
 const YAML = require("yamljs");
+
 const { connectDatabase } = require("./config/database");
+const { connectEventBridge } = require("./config/eventbridge");
 const { startPaymentConsumer } = require("./events/paymentConsumer");
+const { startOutboxPublisher } = require("./services/outboxPublisher");
+const { handleStripeWebhook } = require("./controllers/paymentController");
 const paymentRoutes = require("./routes/payments");
 
 const app = express();
@@ -12,6 +16,15 @@ const PORT = process.env.PORT || 3005;
 const swaggerDocument = YAML.load("./src/docs/openapi.yml");
 
 app.use(cors());
+
+// ✅ Stripe webhook — mounted FIRST with raw body parser, before express.json().
+app.post(
+  "/api/v1/payments/webhook",
+  express.raw({ type: "application/json" }),
+  handleStripeWebhook
+);
+
+// Regular JSON parsing for every other route.
 app.use(express.json());
 
 app.get("/health", (req, res) =>
@@ -32,9 +45,14 @@ app.use((err, req, res, next) => {
 });
 
 async function startServer() {
-  await connectDatabase();          
-  await startPaymentConsumer();     
-  app.listen(PORT, () => console.log(`Payment service running on port ${PORT}`));
+  await connectEventBridge();
+  await connectDatabase();
+  await startPaymentConsumer();
+  startOutboxPublisher();
+
+  app.listen(PORT, () =>
+    console.log(`Payment service running on port ${PORT}`)
+  );
 }
 
 startServer();

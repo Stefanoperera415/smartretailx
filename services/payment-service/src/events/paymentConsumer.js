@@ -6,27 +6,17 @@ const {
   DeleteMessageCommand,
 } = require("@aws-sdk/client-sqs");
 
-const { publishEvent } = require("../config/eventbridge");
-const { hasProcessed, markProcessed } = require("../repositories/processedEventRepository");
+const database = require("../config/database");
+const outboxRepo = require("../repositories/outboxRepository");
 const { processPayment } = require("../services/stripe");
 
-// ----------------------------------------------------------------------
-// ✅ Determine if Stripe is enabled (real payment mode)
-//    When true, the consumer will NOT process payments automatically.
-//    The frontend will handle the payment flow.
-// ----------------------------------------------------------------------
-const USE_STRIPE = process.env.USE_STRIPE === "true" && process.env.STRIPE_SECRET_KEY;
+const USE_STRIPE =
+  process.env.USE_STRIPE === "true" && process.env.STRIPE_SECRET_KEY;
 
-const sqs = new SQSClient({
-  region: process.env.AWS_REGION || "ap-south-1",
-});
-
+const sqs = new SQSClient({ region: process.env.AWS_REGION || "ap-south-1" });
 const PAYMENT_QUEUE_URL = process.env.PAYMENT_QUEUE_URL;
 if (!PAYMENT_QUEUE_URL) throw new Error("PAYMENT_QUEUE_URL is not defined");
 
-// ----------------------------------------------------------------------
-// Start Consumer
-// ----------------------------------------------------------------------
 async function startPaymentConsumer() {
   console.log("========================================");
   console.log("Starting Payment SQS consumer");
@@ -35,9 +25,6 @@ async function startPaymentConsumer() {
   pollMessages();
 }
 
-// ----------------------------------------------------------------------
-// Poll SQS (long polling)
-// ----------------------------------------------------------------------
 async function pollMessages() {
   while (true) {
     try {
@@ -48,12 +35,9 @@ async function pollMessages() {
         VisibilityTimeout: 30,
         MessageAttributeNames: ["All"],
       });
-
       const response = await sqs.send(command);
       const messages = response.Messages || [];
-
       if (messages.length === 0) continue;
-
       for (const message of messages) {
         await processMessage(message);
       }
@@ -64,25 +48,27 @@ async function pollMessages() {
   }
 }
 
-// ----------------------------------------------------------------------
-// Process Individual Message
-// ----------------------------------------------------------------------
+async function claimEvent(eventId, eventType) {
+  const pool = database.pool;
+  const result = await pool.query(
+    `INSERT INTO processed_events (event_id, event_type)
+     VALUES ($1, $2)
+     ON CONFLICT (event_id) DO NOTHING
+     RETURNING event_id`,
+    [eventId, eventType]
+  );
+  return result.rowCount === 1;
+}
+
 async function processMessage(message) {
   try {
     console.log("----------------------------------------");
     console.log("Received Payment SQS message");
 
-    // 1) Parse the SQS body (which is the EventBridge event)
     const rawEvent = JSON.parse(message.Body);
-    console.log("Raw EventBridge event:", JSON.stringify(rawEvent, null, 2));
-
-    // 2) Extract the actual event from the EventBridge envelope
     const detail = rawEvent.detail;
-    if (!detail) {
-      throw new Error("EventBridge message missing 'detail' field");
-    }
+    if (!detail) throw new Error("EventBridge message missing 'detail' field");
 
-    // 3) Now we have the original event that was published
     const eventType = detail.eventType || rawEvent["detail-type"];
     const eventId = detail.eventId;
     const data = detail.data;
@@ -93,49 +79,34 @@ async function processMessage(message) {
 
     console.log("Event type:", eventType);
 
-    // 4) Only handle InventoryReserved events
     if (eventType !== "InventoryReserved") {
       console.log(`Ignoring unsupported event type: ${eventType}`);
       await deleteMessage(message);
       return;
     }
 
-    // 5) Idempotency – skip if already processed
-    if (await hasProcessed(eventId)) {
+    const claimed = await claimEvent(eventId, eventType);
+    if (!claimed) {
       console.log(`Duplicate payment event ignored: ${eventId}`);
       await deleteMessage(message);
       return;
     }
 
-    // 6) Validate order data
     const order = data;
     if (!order.orderId || !order.customerId || !Number.isFinite(Number(order.totalAmount))) {
       throw new Error("InventoryReserved event missing required payment data");
     }
 
-    // ------------------------------------------------------------------
-    // ✅ NEW: If Stripe is enabled, DO NOT process payment automatically.
-    //    The frontend will handle the payment flow.
-    // ------------------------------------------------------------------
     if (USE_STRIPE) {
-      console.log(`Stripe mode enabled – skipping automatic payment for order ${order.orderId}`);
-      // We don't mark as processed – we simply delete the message.
-      // The frontend will later call /confirm-payment and publish PaymentCompleted.
+      console.log(`Stripe mode enabled — skipping automatic payment for order ${order.orderId}`);
       await deleteMessage(message);
-      console.log("Payment SQS message deleted (handled by frontend)");
-      console.log("----------------------------------------");
       return;
     }
 
-    // ------------------------------------------------------------------
-    // MOCK MODE: Process payment automatically (legacy flow)
-    // ------------------------------------------------------------------
+    // Mock mode — process automatically.
     const amount = Number(order.totalAmount);
     const currency = order.currency || "GBP";
 
-    console.log(`Processing payment for order ${order.orderId}, amount ${amount} ${currency}`);
-
-    // 7) Process the payment (Stripe or mock)
     const paymentResult = await processPayment({
       orderId: order.orderId,
       customerId: order.customerId,
@@ -145,59 +116,69 @@ async function processMessage(message) {
       warehouseId: order.warehouseId || "WH01",
     });
 
-    // 8) Publish outcome event
-    if (paymentResult.success) {
-      await publishEvent("PaymentCompleted", {
-        orderId: order.orderId,
-        customerId: order.customerId,
-        amount,
-        currency,
-        items: order.items || [],
-        warehouseId: order.warehouseId || "WH01",
-        transactionRef: paymentResult.transactionRef,
-      });
-      console.log(`PaymentCompleted published for ${order.orderId}`);
-    } else {
-      await publishEvent("PaymentFailed", {
-        orderId: order.orderId,
-        customerId: order.customerId,
-        amount,
-        currency,
-        items: order.items || [],
-        warehouseId: order.warehouseId || "WH01",
-        reason: paymentResult.reason || "Payment failed",
-        transactionRef: paymentResult.transactionRef,
-      });
-      console.log(`PaymentFailed published for ${order.orderId}`);
+    // Write outcome to outbox atomically with the event id marker.
+    const pool = database.pool;
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (paymentResult.success) {
+        await outboxRepo.enqueue(
+          client,
+          `pay-complete-${order.orderId}`,
+          "PaymentCompleted",
+          {
+            orderId: order.orderId,
+            customerId: order.customerId,
+            amount,
+            currency,
+            items: order.items || [],
+            warehouseId: order.warehouseId || "WH01",
+            warehouseMapping: order.warehouseMapping || null,
+            transactionRef: paymentResult.transactionRef,
+          }
+        );
+      } else {
+        await outboxRepo.enqueue(
+          client,
+          `pay-fail-${order.orderId}`,
+          "PaymentFailed",
+          {
+            orderId: order.orderId,
+            customerId: order.customerId,
+            amount,
+            currency,
+            items: order.items || [],
+            warehouseId: order.warehouseId || "WH01",
+            warehouseMapping: order.warehouseMapping || null,
+            reason: paymentResult.reason || "Payment failed",
+            transactionRef: paymentResult.transactionRef,
+          }
+        );
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
     }
 
-    // 9) Mark as processed
-    await markProcessed(eventId, eventType);
-
-    // 10) Delete the SQS message
     await deleteMessage(message);
-    console.log("Payment SQS message deleted successfully");
+    console.log("Payment SQS message processed");
     console.log("----------------------------------------");
   } catch (error) {
     console.error("Payment consumer error:", error);
-    // Do NOT delete the message – SQS will retry after visibility timeout
     console.error("Message will remain in SQS and will be retried.");
   }
 }
 
-// ----------------------------------------------------------------------
-// Delete Message
-// ----------------------------------------------------------------------
 async function deleteMessage(message) {
-  const command = new DeleteMessageCommand({
+  await sqs.send(new DeleteMessageCommand({
     QueueUrl: PAYMENT_QUEUE_URL,
     ReceiptHandle: message.ReceiptHandle,
-  });
-  await sqs.send(command);
+  }));
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 module.exports = { startPaymentConsumer };

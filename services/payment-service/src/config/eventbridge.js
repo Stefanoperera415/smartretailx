@@ -12,32 +12,27 @@ const eventBridge = new EventBridgeClient({
 const EVENT_BUS_NAME =
   process.env.EVENTBRIDGE_BUS_NAME || "smartretailx-events";
 
+const EVENT_SOURCE = "smartretailx.payment-service"; // ✅ FIXED
+
 async function connectEventBridge() {
-  try {
-    console.log("========================================");
-    console.log("Connected to Amazon EventBridge");
-    console.log("Region:", process.env.AWS_REGION || "ap-south-1");
-    console.log("Event bus:", EVENT_BUS_NAME);
-    console.log("Source: smartretailx.payment-service");
-    console.log("========================================");
-  } catch (error) {
-    console.error("EventBridge initialization failed:", error);
-    process.exit(1);
-  }
+  console.log("========================================");
+  console.log("Connected to Amazon EventBridge");
+  console.log("Region:", process.env.AWS_REGION || "ap-south-1");
+  console.log("Event bus:", EVENT_BUS_NAME);
+  console.log("Source:", EVENT_SOURCE);
+  console.log("========================================");
 }
 
-async function publishEvent(eventType, data) {
+async function publishEvent(eventType, data, options = {}) {
+  const eventId =
+    options.eventId ||
+    `evt-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+
   const event = {
-    eventId: `evt-${Date.now()}-${Math.random()
-      .toString(36)
-      .substring(2, 8)}`,
-
+    eventId,
     eventType,
-
-    source: "smartretailx.payment-service",
-
+    source: EVENT_SOURCE,
     timestamp: new Date().toISOString(),
-
     data,
   };
 
@@ -45,48 +40,22 @@ async function publishEvent(eventType, data) {
     Entries: [
       {
         EventBusName: EVENT_BUS_NAME,
-
-        Source: "smartretailx.payment-service",
-
+        Source: EVENT_SOURCE,
         DetailType: eventType,
-
         Detail: JSON.stringify(event),
       },
     ],
   });
 
-  try {
-    const response = await eventBridge.send(command);
+  const response = await eventBridge.send(command);
 
-    if (response.FailedEntryCount > 0) {
-      console.error(
-        "EventBridge failed to publish event:",
-        response.Entries
-      );
-
-      throw new Error(
-        `Failed to publish EventBridge event: ${eventType}`
-      );
-    }
-
-    console.log(
-      `Published EventBridge event: ${eventType}`
-    );
-
-    return event;
-  } catch (error) {
-    console.error(
-      `Failed to publish EventBridge event: ${eventType}`
-    );
-
-    console.error(error);
-
-    throw error;
+  if (response.FailedEntryCount > 0) {
+    console.error("Failed to publish EventBridge event:", response.Entries);
+    throw new Error("EventBridge event publishing failed");
   }
+
+  console.log(`Published EventBridge event: ${eventType} (${eventId})`);
+  return event;
 }
 
-module.exports = {
-  connectEventBridge,
-  publishEvent,
-  EVENT_BUS_NAME,
-};
+module.exports = { connectEventBridge, publishEvent, EVENT_BUS_NAME };

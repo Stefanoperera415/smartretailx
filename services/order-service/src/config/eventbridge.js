@@ -13,26 +13,28 @@ const EVENT_BUS_NAME =
   process.env.EVENTBRIDGE_BUS_NAME || "smartretailx-events";
 
 async function connectEventBridge() {
-  try {
-    // EventBridge doesn't require a persistent connection.
-    // Creating the client is enough.
-    console.log("========================================");
-    console.log("Connected to Amazon EventBridge");
-    console.log("Region:", process.env.AWS_REGION || "ap-south-1");
-    console.log("Event bus:", EVENT_BUS_NAME);
-    console.log("========================================");
-  } catch (error) {
-    console.error("EventBridge initialization failed:");
-    console.error(error);
-    process.exit(1);
-  }
+  console.log("========================================");
+  console.log("Connected to Amazon EventBridge");
+  console.log("Region:", process.env.AWS_REGION || "ap-south-1");
+  console.log("Event bus:", EVENT_BUS_NAME);
+  console.log("Source: smartretailx.order-service");
+  console.log("========================================");
 }
 
-async function publishEvent(eventType, data) {
+/**
+ * Publish an event.
+ * @param {string} eventType
+ * @param {object} data
+ * @param {{ eventId?: string }} [options] — pass eventId to make the event
+ *   deterministic (required for compensations so retries are idempotent).
+ */
+async function publishEvent(eventType, data, options = {}) {
+  const eventId =
+    options.eventId ||
+    `evt-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+
   const event = {
-    eventId: `evt-${Date.now()}-${Math.random()
-      .toString(36)
-      .substring(2, 8)}`,
+    eventId,
     eventType,
     source: "smartretailx.order-service",
     timestamp: new Date().toISOString(),
@@ -57,13 +59,8 @@ async function publishEvent(eventType, data) {
     throw new Error("EventBridge event publishing failed");
   }
 
-  console.log(`Published EventBridge event: ${eventType}`);
-
+  console.log(`Published EventBridge event: ${eventType} (${eventId})`);
   return event;
 }
 
-module.exports = {
-  connectEventBridge,
-  publishEvent,
-  EVENT_BUS_NAME,
-};
+module.exports = { connectEventBridge, publishEvent, EVENT_BUS_NAME };

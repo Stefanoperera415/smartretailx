@@ -12,7 +12,7 @@ async function withRetry(fn, maxAttempts = 5, delay = 1000) {
       lastError = err;
       console.warn(`Connection attempt ${attempt}/${maxAttempts} failed: ${err.message}`);
       if (attempt < maxAttempts) {
-        await new Promise(resolve => setTimeout(resolve, delay * attempt));
+        await new Promise((resolve) => setTimeout(resolve, delay * attempt));
       }
     }
   }
@@ -67,7 +67,7 @@ async function connectDatabase() {
 
     await initializeDatabase();
 
-    // ✅ Refresh IAM token every 10 minutes (tokens expire at 15)
+    // Refresh IAM token every 10 minutes (tokens expire at 15)
     setInterval(async () => {
       try {
         console.log("🔄 Refreshing Aurora IAM token...");
@@ -80,7 +80,6 @@ async function connectDatabase() {
         console.error("Failed to refresh Aurora pool:", err.message);
       }
     }, 10 * 60 * 1000);
-
   } catch (error) {
     console.error("Aurora PostgreSQL connection failed:", error);
     process.exit(1);
@@ -88,7 +87,6 @@ async function connectDatabase() {
 }
 
 async function initializeDatabase() {
-  // 1) Create tables (if missing)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS orders (
       order_id VARCHAR(50) PRIMARY KEY,
@@ -105,7 +103,7 @@ async function initializeDatabase() {
       order_item_id SERIAL PRIMARY KEY,
       order_id VARCHAR(50) NOT NULL REFERENCES orders(order_id) ON DELETE CASCADE,
       product_id VARCHAR(50) NOT NULL,
-      product_name VARCHAR(255),            -- ✅ NEW
+      product_name VARCHAR(255),
       quantity INTEGER NOT NULL CHECK (quantity > 0),
       unit_price DECIMAL(10,2) NOT NULL,
       subtotal DECIMAL(10,2) NOT NULL
@@ -117,17 +115,29 @@ async function initializeDatabase() {
       processed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- ✅ NEW: transactional outbox for reliable event publication
+    CREATE TABLE IF NOT EXISTS outbox (
+      event_id VARCHAR(191) NOT NULL PRIMARY KEY,
+      event_type VARCHAR(100) NOT NULL,
+      payload JSONB NOT NULL,
+      published_at TIMESTAMP WITH TIME ZONE,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
     CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
+    CREATE INDEX IF NOT EXISTS idx_outbox_unpublished
+      ON outbox (created_at)
+      WHERE published_at IS NULL;
   `);
 
-  // 2) Migration: add product_name if table already existed without it
   await pool.query(`
     ALTER TABLE order_items
       ADD COLUMN IF NOT EXISTS product_name VARCHAR(255);
   `);
 
-  // 3) Trigger function + trigger (idempotent)
   await pool.query(`
     CREATE OR REPLACE FUNCTION update_updated_at_column()
     RETURNS TRIGGER AS $$
@@ -144,7 +154,7 @@ async function initializeDatabase() {
       EXECUTE FUNCTION update_updated_at_column();
   `);
 
-  console.log("Order database schema verified (tables + product_name column ensured).");
+  console.log("Order database schema verified (tables + outbox + product_name ensured).");
 }
 
 module.exports = {

@@ -7,8 +7,8 @@ const {
 const { sqs, NOTIFICATION_QUEUE_URL } = require("../config/sqs");
 const notificationRepo = require("../repositories/notificationRepository");
 const {
-  hasProcessed,
   markProcessed,
+  unmarkProcessed,
 } = require("../service/idempotencyService");
 const notificationBus = require("./notificationBus");
 const { sendEmail } = require("../service/emailService");
@@ -97,6 +97,8 @@ function subjectForType(type) {
       return "SmartRetailX – Payment confirmed";
     case "PAYMENT_FAILED":
       return "SmartRetailX – Payment failed";
+    case "ORDER_CANCELLED":
+      return "SmartRetailX – Order cancelled";   // ✅ NEW
     default:
       return "SmartRetailX notification";
   }
@@ -143,6 +145,8 @@ async function pollMessages() {
 // Process Individual Message
 // ==========================================
 async function processMessage(message) {
+  let claimedEventId = null;
+
   try {
     console.log("----------------------------------------");
     console.log("Received Notification SQS message");
@@ -157,41 +161,61 @@ async function processMessage(message) {
 
     if (!eventId) throw new Error("Event missing eventId");
     if (!eventType) throw new Error("Event missing eventType");
-    if (!data || typeof data !== "object") throw new Error("Event missing data");
+    if (!data || typeof data !== "object")
+      throw new Error("Event missing data");
 
-    console.log("Event type:", eventType);
+    console.log("Event type:", eventType, "id:", eventId);
 
-    if (eventType === "OrderCreated") {
-      await handleOrderCreated(data, eventId);
-    } else if (eventType === "PaymentCompleted") {
-      await handlePaymentCompleted(data, eventId);
-    } else if (eventType === "PaymentFailed") {
-      await handlePaymentFailed(data, eventId);
-    } else {
+    // Reject unsupported event types up front — no claim needed.
+    const supported = ["OrderCreated", "PaymentCompleted", "PaymentFailed", "OrderCancelled"];
+    if (!supported.includes(eventType)) {
       console.log(`Ignoring unsupported event type: ${eventType}`);
       await deleteMessage(message);
       return;
     }
 
-    await markProcessed(eventId, eventType);
+    // ✅ CLAIM FIRST — atomic conditional write closes the race between
+    //    concurrent SQS deliveries of the same message.
+    const claimed = await markProcessed(eventId, eventType);
+    if (!claimed) {
+      console.log(`Duplicate event ignored: ${eventId}`);
+      await deleteMessage(message);
+      return;
+    }
+    claimedEventId = eventId;
+
+    // Dispatch — handlers no longer check hasProcessed (we own the claim).
+    if (eventType === "OrderCreated") {
+      await handleOrderCreated(data);
+    } else if (eventType === "PaymentCompleted") {
+      await handlePaymentCompleted(data);
+    } else if (eventType === "PaymentFailed") {
+      await handlePaymentFailed(data);
+    } else if (eventType === "OrderCancelled") {
+      await handleOrderCancelled(data);
+    }
+
     await deleteMessage(message);
     console.log("Notification SQS message deleted successfully");
     console.log("----------------------------------------");
   } catch (error) {
     console.error("Notification consumer error:", error);
-    console.error("Message will remain in SQS and will be retried.");
+
+    // ✅ Roll back the claim so SQS redelivery retries the handler.
+    if (claimedEventId) {
+      await unmarkProcessed(claimedEventId);
+      console.warn(`Claim rolled back for ${claimedEventId} — message will retry`);
+    }
+
+    console.log("Message will remain in SQS and will be retried.");
   }
 }
 
 // ==========================================
 // Handlers
 // ==========================================
-async function handleOrderCreated(data, eventId) {
-  if (await hasProcessed(eventId)) {
-    console.log(`Duplicate event ignored: ${eventId}`);
-    return;
-  }
 
+async function handleOrderCreated(data) {
   const { orderId, customerId, totalAmount, currency, items = [] } = data;
   if (!orderId || !customerId) {
     throw new Error("OrderCreated missing orderId or customerId");
@@ -201,7 +225,6 @@ async function handleOrderCreated(data, eventId) {
 
   await persistAndDeliver({
     notificationId: generateNotificationId(),
-    eventId,
     customerId,
     type: "ORDER_CREATED",
     channel: "EMAIL",
@@ -213,12 +236,7 @@ async function handleOrderCreated(data, eventId) {
   console.log(`Notification created for OrderCreated: ${orderId}`);
 }
 
-async function handlePaymentCompleted(data, eventId) {
-  if (await hasProcessed(eventId)) {
-    console.log(`Duplicate event ignored: ${eventId}`);
-    return;
-  }
-
+async function handlePaymentCompleted(data) {
   const { orderId, customerId, amount, currency, items = [] } = data;
   if (!orderId || !customerId) {
     throw new Error("PaymentCompleted missing orderId or customerId");
@@ -228,7 +246,6 @@ async function handlePaymentCompleted(data, eventId) {
 
   await persistAndDeliver({
     notificationId: generateNotificationId(),
-    eventId,
     customerId,
     type: "PAYMENT_COMPLETED",
     channel: "EMAIL",
@@ -244,12 +261,7 @@ async function handlePaymentCompleted(data, eventId) {
   );
 }
 
-async function handlePaymentFailed(data, eventId) {
-  if (await hasProcessed(eventId)) {
-    console.log(`Duplicate event ignored: ${eventId}`);
-    return;
-  }
-
+async function handlePaymentFailed(data) {
   const { orderId, customerId, amount, currency, reason, items = [] } = data;
   if (!orderId || !customerId) {
     throw new Error("PaymentFailed missing orderId or customerId");
@@ -259,7 +271,6 @@ async function handlePaymentFailed(data, eventId) {
 
   await persistAndDeliver({
     notificationId: generateNotificationId(),
-    eventId,
     customerId,
     type: "PAYMENT_FAILED",
     channel: "EMAIL",
@@ -271,6 +282,34 @@ async function handlePaymentFailed(data, eventId) {
   });
 
   console.log(`Notification created for PaymentFailed: ${orderId}`);
+}
+
+/**
+ * Single cancellation handler for every failure path:
+ * inventory unavailable, payment failure, admin cancel, saga timeout.
+ * Order-service converges all of these into a single OrderCancelled event.
+ */
+async function handleOrderCancelled(data) {
+  const { orderId, customerId, reason, items = [] } = data;
+  if (!orderId || !customerId) {
+    throw new Error("OrderCancelled missing orderId or customerId");
+  }
+
+  const productSummary = buildProductSummary(items);
+  const reasonText = reason ? ` Reason: ${reason}.` : "";
+
+  await persistAndDeliver({
+    notificationId: generateNotificationId(),
+    customerId,
+    type: "ORDER_CANCELLED", // ✅ proper type instead of PAYMENT_FAILED
+    channel: "EMAIL",
+    message:
+      `Your order ${orderId} for ${productSummary} has been cancelled.${reasonText}`,
+    metadata: { orderId, reason, items },
+    status: "PENDING",
+  });
+
+  console.log(`Cancellation notification created for ${orderId}`);
 }
 
 // ==========================================

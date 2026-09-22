@@ -1,36 +1,31 @@
 const orderRepository = require("../repositories/orderRepository");
 const { getUser, getProduct } = require("../clients/serviceClient");
-const { publishEvent } = require("../config/eventbridge");
+const outboxRepo = require("../repositories/outboxRepository");
 
 const VALID_STATUSES = [
-  "PENDING",
-  "CONFIRMED",
-  "PROCESSING",
-  "SHIPPED",
-  "DELIVERED",
-  "CANCELLED",
-  "PAYMENT_FAILED",
+  "PENDING", "CONFIRMED", "PROCESSING", "SHIPPED",
+  "DELIVERED", "CANCELLED", "PAYMENT_FAILED",
 ];
+
+function generateOrderId() {
+  // Date.now() alone can collide under high concurrency. Add entropy.
+  const suffix = Math.random().toString(36).substring(2, 6);
+  return `ORD${Date.now()}-${suffix}`;
+}
 
 async function getOrders(req, res, next) {
   try {
     const orders = await orderRepository.findAll();
     return res.status(200).json({ data: orders });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 }
 
 async function getOrderById(req, res, next) {
   try {
     const order = await orderRepository.findById(req.params.orderId);
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
+    if (!order) return res.status(404).json({ error: "Order not found" });
     return res.status(200).json({ data: order });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 }
 
 async function getOrdersByCustomer(req, res, next) {
@@ -41,39 +36,28 @@ async function getOrdersByCustomer(req, res, next) {
     }
     const orders = await orderRepository.findByCustomerId(requestedCustomerId);
     return res.status(200).json({ data: orders });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 }
 
 async function createOrder(req, res) {
   try {
     const {
-      customerId,
-      items,
-      shippingAddress,
-      currency = "GBP",
-      warehouseId,
+      customerId, items, shippingAddress,
+      currency = "GBP", warehouseId,
     } = req.body;
 
-    if (!customerId) {
-      return res.status(400).json({ error: "customerId is required" });
-    }
+    if (!customerId) return res.status(400).json({ error: "customerId is required" });
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "At least one order item is required" });
     }
-    if (!shippingAddress) {
-      return res.status(400).json({ error: "shippingAddress is required" });
-    }
+    if (!shippingAddress) return res.status(400).json({ error: "shippingAddress is required" });
 
     if (req.user.role === "CUSTOMER" && req.user.id !== customerId) {
       return res.status(403).json({ error: "You can only create orders for yourself" });
     }
 
     const customer = await getUser(customerId, req.headers.authorization);
-    if (!customer) {
-      return res.status(400).json({ error: "Customer does not exist" });
-    }
+    if (!customer) return res.status(400).json({ error: "Customer does not exist" });
 
     const orderItems = [];
     for (const item of items) {
@@ -90,7 +74,7 @@ async function createOrder(req, res) {
       const subtotal = Number((unitPrice * item.quantity).toFixed(2));
       orderItems.push({
         productId: product.productId,
-        productName: product.name, // ✅ NEW — captured for notifications
+        productName: product.name,
         quantity: item.quantity,
         unitPrice,
         subtotal,
@@ -102,7 +86,7 @@ async function createOrder(req, res) {
     );
 
     const order = {
-      orderId: `ORD${Date.now()}`,
+      orderId: generateOrderId(),
       customerId,
       status: "PENDING",
       totalAmount,
@@ -111,21 +95,20 @@ async function createOrder(req, res) {
       items: orderItems,
     };
 
-    const createdOrder = await orderRepository.create(order);
-
+    // ✅ Outbox: write the event inside the same transaction as the order insert.
+    const eventId = `order-created-${order.orderId}`;
     const eventPayload = {
-      orderId: createdOrder.orderId,
-      customerId: createdOrder.customerId,
-      totalAmount: createdOrder.totalAmount,
-      currency: createdOrder.currency,
-      items: createdOrder.items, // ✅ already contains productName
+      orderId: order.orderId,
+      customerId: order.customerId,
+      totalAmount: order.totalAmount,
+      currency: order.currency,
+      items: order.items,
     };
+    if (warehouseId) eventPayload.warehouseId = warehouseId;
 
-    if (warehouseId) {
-      eventPayload.warehouseId = warehouseId;
-    }
-
-    await publishEvent("OrderCreated", eventPayload);
+    const createdOrder = await orderRepository.create(order, async (client) => {
+      await outboxRepo.enqueue(client, eventId, "OrderCreated", eventPayload);
+    });
 
     return res.status(201).json({ data: createdOrder });
   } catch (error) {
@@ -136,9 +119,7 @@ async function createOrder(req, res) {
 
 async function updateOrderStatus(req, res, next) {
   const { status } = req.body;
-  if (!status) {
-    return res.status(400).json({ error: "status is required" });
-  }
+  if (!status) return res.status(400).json({ error: "status is required" });
   if (!VALID_STATUSES.includes(status)) {
     return res.status(400).json({
       error: `Invalid status. Allowed values: ${VALID_STATUSES.join(", ")}`,
@@ -146,17 +127,58 @@ async function updateOrderStatus(req, res, next) {
   }
   try {
     const order = await orderRepository.findById(req.params.orderId);
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
+    if (!order) return res.status(404).json({ error: "Order not found" });
     if (req.user.role === "CUSTOMER") {
       return res.status(403).json({ error: "Customers cannot update order status" });
     }
-    const updatedOrder = await orderRepository.updateStatus(req.params.orderId, status);
+
+    const isCancelling =
+      status === "CANCELLED" && order.status !== "CANCELLED";
+
+    // ✅ When cancelling a previously non-cancelled order, emit compensation.
+    const updatedOrder = await orderRepository.updateStatus(
+      req.params.orderId,
+      status,
+      async (client) => {
+        if (isCancelling) {
+          // Release inventory that was reserved for this order.
+          // Use per-item warehouseId when available; fallback to event's warehouse.
+          const releaseEventId = `release-${order.orderId}`;
+          const releaseItems = order.items.map((it) => ({
+            productId: it.productId,
+            quantity: it.quantity,
+            warehouseId: it.warehouseId || null, // may be null → consumer falls back
+          }));
+          await outboxRepo.enqueue(client, releaseEventId, "ReleaseInventory", {
+            orderId: order.orderId,
+            customerId: order.customerId,
+            items: releaseItems,
+            warehouseId: order.warehouseId || null,
+          });
+
+          // Request refund — payment-service decides if it applies.
+          const refundEventId = `refund-${order.orderId}`;
+          await outboxRepo.enqueue(client, refundEventId, "RefundPayment", {
+            orderId: order.orderId,
+            customerId: order.customerId,
+            amount: order.totalAmount,
+            currency: order.currency,
+            reason: "Order cancelled",
+          });
+
+          // Notify the customer.
+          const notifyEventId = `notify-cancel-${order.orderId}`;
+          await outboxRepo.enqueue(client, notifyEventId, "OrderCancelled", {
+            orderId: order.orderId,
+            customerId: order.customerId,
+            items: order.items,
+          });
+        }
+      }
+    );
+
     return res.status(200).json({ data: updatedOrder });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 }
 
 module.exports = {

@@ -3,17 +3,15 @@ require("dotenv").config();
 const { Pool } = require("pg");
 const { Signer } = require("@aws-sdk/rds-signer");
 
-// Retry helper
 async function withRetry(fn, maxAttempts = 5, delay = 1000) {
   let lastError;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
+    try { return await fn(); }
+    catch (err) {
       lastError = err;
       console.warn(`Connection attempt ${attempt}/${maxAttempts} failed: ${err.message}`);
       if (attempt < maxAttempts) {
-        await new Promise(resolve => setTimeout(resolve, delay * attempt));
+        await new Promise((r) => setTimeout(r, delay * attempt));
       }
     }
   }
@@ -33,20 +31,14 @@ async function createPool() {
   } else {
     console.log("Using IAM authentication (PG_PASSWORD not set)");
     const signer = new Signer({
-      hostname: host,
-      port: port,
-      username: user,
+      hostname: host, port, username: user,
       region: process.env.AWS_REGION || "ap-south-1",
     });
     password = await signer.getAuthToken();
   }
 
   return new Pool({
-    host,
-    port,
-    user,
-    password,
-    database,
+    host, port, user, password, database,
     ssl: { rejectUnauthorized: false },
     max: 10,
     idleTimeoutMillis: 30000,
@@ -61,32 +53,32 @@ async function connectDatabase() {
     pool = await withRetry(async () => {
       const newPool = await createPool();
       const client = await newPool.connect();
-      const result = await client.query(`
-        SELECT current_database() AS database,
-               inet_server_addr() AS server_ip,
-               inet_server_port() AS server_port,
-               version() AS postgres_version
-      `);
-      console.log("========================================");
-      console.log("Connected to Aurora PostgreSQL (Payment Service)");
-      console.log("Database:", result.rows[0].database);
-      console.log("Server IP:", result.rows[0].server_ip);
-      console.log("Server Port:", result.rows[0].server_port);
-      console.log("PostgreSQL Version:", result.rows[0].postgres_version);
-      console.log("========================================");
+      await client.query(`SELECT 1`);
       client.release();
       return newPool;
     }, 5, 2000);
 
     await initializeDatabase();
+
+    setInterval(async () => {
+      try {
+        console.log("🔄 Refreshing Aurora IAM token...");
+        const newPool = await createPool();
+        const oldPool = pool;
+        pool = newPool;
+        setTimeout(() => oldPool.end().catch(() => {}), 5000);
+        console.log("✅ Aurora pool refreshed.");
+      } catch (err) {
+        console.error("Failed to refresh Aurora pool:", err.message);
+      }
+    }, 10 * 60 * 1000);
   } catch (error) {
-    console.error("Aurora PostgreSQL connection failed after retries:", error);
+    console.error("Aurora PostgreSQL connection failed:", error);
     process.exit(1);
   }
 }
 
 async function initializeDatabase() {
-  // Create tables if they don't exist
   await pool.query(`
     CREATE TABLE IF NOT EXISTS payments (
       payment_id VARCHAR(50) PRIMARY KEY,
@@ -109,9 +101,43 @@ async function initializeDatabase() {
       event_type VARCHAR(100) NOT NULL,
       processed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS outbox (
+      event_id VARCHAR(191) NOT NULL PRIMARY KEY,
+      event_type VARCHAR(100) NOT NULL,
+      payload JSONB NOT NULL,
+      published_at TIMESTAMP WITH TIME ZONE,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_outbox_unpublished
+      ON outbox (created_at)
+      WHERE published_at IS NULL;
+
+    CREATE TABLE IF NOT EXISTS stripe_events (
+      stripe_event_id VARCHAR(191) NOT NULL PRIMARY KEY,
+      event_type VARCHAR(100) NOT NULL,
+      received_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- ✅ NEW: staging table for PaymentIntent → items mapping
+    CREATE TABLE IF NOT EXISTS pending_payment_intents (
+      payment_intent_id VARCHAR(191) PRIMARY KEY,
+      order_id VARCHAR(50) NOT NULL,
+      customer_id VARCHAR(50) NOT NULL,
+      items JSONB NOT NULL DEFAULT '[]'::jsonb,
+      warehouse_id VARCHAR(50),
+      warehouse_mapping JSONB,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Cleanup index — staged intents older than 2 days are stale
+    CREATE INDEX IF NOT EXISTS idx_pending_intents_created
+      ON pending_payment_intents (created_at);
   `);
 
-  // Create the function (idempotent)
   await pool.query(`
     CREATE OR REPLACE FUNCTION update_updated_at_column()
     RETURNS TRIGGER AS $$
@@ -122,14 +148,10 @@ async function initializeDatabase() {
     $$ LANGUAGE plpgsql;
   `);
 
-  // Create the trigger only if it does not exist
   await pool.query(`
     DO $$
     BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_trigger
-        WHERE tgname = 'update_payments_updated_at'
-      ) THEN
+      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_payments_updated_at') THEN
         CREATE TRIGGER update_payments_updated_at
           BEFORE UPDATE ON payments
           FOR EACH ROW
@@ -139,7 +161,7 @@ async function initializeDatabase() {
     $$;
   `);
 
-  console.log("Payment database schema verified (tables created if missing).");
+  console.log("Payment database schema verified.");
 }
 
 module.exports = {
