@@ -4,9 +4,31 @@ const {
   PutCommand,
   UpdateCommand,
   QueryCommand,
-  ScanCommand,     // ✅ added
-  DeleteCommand,   // ✅ added
+  ScanCommand,
+  DeleteCommand,
 } = require("@aws-sdk/lib-dynamodb");
+
+/**
+ * Normalise an inventory item so every consumer sees the same shape.
+ * Guarantees numeric fields and a computed `available`.
+ */
+function normalise(item) {
+  if (!item) return null;
+  const quantity = Number(item.quantity) || 0;
+  const reservedQuantity = Number(item.reservedQuantity) || 0;
+  const available =
+    item.available !== undefined
+      ? Number(item.available)
+      : quantity - reservedQuantity;
+
+  return {
+    ...item,
+    quantity,
+    reservedQuantity,
+    available,
+    stockOnHand: quantity, // alias, easier to reason about in admin UI
+  };
+}
 
 async function findByProductId(productId) {
   const result = await dynamoDB.send(
@@ -16,7 +38,7 @@ async function findByProductId(productId) {
       ExpressionAttributeValues: { ":pid": productId },
     })
   );
-  return result.Items || [];
+  return (result.Items || []).map(normalise);
 }
 
 async function findOne(productId, warehouseId) {
@@ -26,13 +48,13 @@ async function findOne(productId, warehouseId) {
       Key: { productId, warehouseId },
     })
   );
-  return result.Item || null;
+  return normalise(result.Item);
 }
 
 /**
- * Upsert inventory item – FIXED `available` calculation.
- * Sets quantity, reorderLevel, preserves existing reservedQuantity,
- * and sets available = quantity - reservedQuantity.
+ * Upsert inventory item.
+ * Sets quantity and reorderLevel, preserves existing reservedQuantity,
+ * and recomputes available = quantity - reservedQuantity.
  */
 async function upsert(productId, warehouseId, quantity, reorderLevel = 10) {
   const result = await dynamoDB.send(
@@ -59,11 +81,13 @@ async function upsert(productId, warehouseId, quantity, reorderLevel = 10) {
       ReturnValues: "ALL_NEW",
     })
   );
-  return result.Attributes;
+  return normalise(result.Attributes);
 }
 
 /**
  * Atomic reserve: decrement available, increment reservedQuantity.
+ * NOTE: `quantity` (physical stock) is intentionally NOT changed here.
+ *       Physical stock leaves the shelf only on ship, not on reserve.
  * Condition: available >= requested quantity.
  */
 async function reserveStock(productId, warehouseId, quantity) {
@@ -88,7 +112,7 @@ async function reserveStock(productId, warehouseId, quantity) {
       ReturnValues: "ALL_NEW",
     })
   );
-  return result.Attributes;
+  return normalise(result.Attributes);
 }
 
 /**
@@ -117,7 +141,7 @@ async function releaseStock(productId, warehouseId, quantity) {
       ReturnValues: "ALL_NEW",
     })
   );
-  return result.Attributes;
+  return normalise(result.Attributes);
 }
 
 async function findAll() {
@@ -126,7 +150,7 @@ async function findAll() {
       TableName: INVENTORY_TABLE,
     })
   );
-  return result.Items || [];
+  return (result.Items || []).map(normalise);
 }
 
 async function deleteInventory(productId, warehouseId) {
@@ -137,7 +161,7 @@ async function deleteInventory(productId, warehouseId) {
       ReturnValues: "ALL_OLD",
     })
   );
-  return !!result.Attributes; // true if something was deleted
+  return !!result.Attributes;
 }
 
 module.exports = {

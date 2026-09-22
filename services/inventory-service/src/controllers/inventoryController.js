@@ -1,6 +1,14 @@
 const inventoryRepo = require("../repositories/inventoryRepository");
-const warehouseRepo = require("../repositories/warehouseRepository"); // ✅ new
+const warehouseRepo = require("../repositories/warehouseRepository");
 
+/**
+ * All endpoints below return items shaped as:
+ *   { quantity, reservedQuantity, available, stockOnHand, reorderLevel, ... }
+ *
+ * The admin UI should display `available` (or `stockOnHand - reservedQuantity`)
+ * when it wants to show "stock available to sell".
+ * `quantity` is physical stock on hand and does NOT change on reservation.
+ */
 async function getInventory(req, res) {
   try {
     const { productId } = req.params;
@@ -62,7 +70,6 @@ async function updateInventory(req, res) {
       return res.status(400).json({ error: "warehouseId is required" });
     }
 
-    // ✅ Validate warehouse exists
     const warehouse = await warehouseRepo.findById(warehouseId);
     if (!warehouse) {
       return res.status(400).json({ error: "Warehouse not found" });
@@ -87,7 +94,7 @@ async function updateInventory(req, res) {
     }
 
     const current = await inventoryRepo.findOne(productId, warehouseId);
-    if (current && current.reservedQuantity > (quantity || current.quantity)) {
+    if (current && current.reservedQuantity > (quantity ?? current.quantity)) {
       return res
         .status(409)
         .json({ error: "Quantity cannot be lower than reserved quantity" });
@@ -97,7 +104,7 @@ async function updateInventory(req, res) {
       productId,
       warehouseId,
       quantity !== undefined ? quantity : current?.quantity || 0,
-      reorderLevel !== undefined ? reorderLevel : current?.reorderLevel || 10,
+      reorderLevel !== undefined ? reorderLevel : current?.reorderLevel || 10
     );
 
     return res.status(200).json({ data: updated });
@@ -113,14 +120,11 @@ async function reserveInventory(req, res) {
     const { warehouseId, quantity } = req.body;
 
     if (!warehouseId || !Number.isInteger(quantity) || quantity <= 0) {
-      return res
-        .status(400)
-        .json({
-          error: "warehouseId and positive integer quantity are required",
-        });
+      return res.status(400).json({
+        error: "warehouseId and positive integer quantity are required",
+      });
     }
 
-    // ✅ Validate warehouse exists
     const warehouse = await warehouseRepo.findById(warehouseId);
     if (!warehouse) {
       return res.status(400).json({ error: "Warehouse not found" });
@@ -129,7 +133,7 @@ async function reserveInventory(req, res) {
     const updated = await inventoryRepo.reserveStock(
       productId,
       warehouseId,
-      quantity,
+      quantity
     );
     if (!updated) {
       return res
@@ -151,14 +155,11 @@ async function releaseInventory(req, res) {
     const { warehouseId, quantity } = req.body;
 
     if (!warehouseId || !Number.isInteger(quantity) || quantity <= 0) {
-      return res
-        .status(400)
-        .json({
-          error: "warehouseId and positive integer quantity are required",
-        });
+      return res.status(400).json({
+        error: "warehouseId and positive integer quantity are required",
+      });
     }
 
-    // ✅ Validate warehouse exists
     const warehouse = await warehouseRepo.findById(warehouseId);
     if (!warehouse) {
       return res.status(400).json({ error: "Warehouse not found" });
@@ -167,7 +168,7 @@ async function releaseInventory(req, res) {
     const updated = await inventoryRepo.releaseStock(
       productId,
       warehouseId,
-      quantity,
+      quantity
     );
     if (!updated) {
       return res

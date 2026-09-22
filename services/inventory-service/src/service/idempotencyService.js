@@ -8,4 +8,8 @@ async function markProcessed(eventId, eventType) {
   return processedEventRepo.markProcessed(eventId, eventType);
 }
 
-module.exports = { hasProcessed, markProcessed };
+async function unmarkProcessed(eventId) {
+  return processedEventRepo.unmarkProcessed(eventId);
+}
+
+module.exports = { hasProcessed, markProcessed, unmarkProcessed };
